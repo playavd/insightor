@@ -96,3 +96,14 @@ async def touch_ad(ad_id: str):
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await db.execute("UPDATE ads SET last_checked = ? WHERE ad_id = ?", (datetime.now(), ad_id))
             await db.commit()
+
+async def update_ad_status(ad_id: str, new_status: str):
+    """Update the status of an ad (e.g., Basic -> VIP)."""
+    async with db_lock:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            await db.execute("""
+                UPDATE ads 
+                SET ad_status = ?, last_checked = ? 
+                WHERE ad_id = ?
+            """, (new_status, datetime.now(), ad_id))
+            await db.commit()
