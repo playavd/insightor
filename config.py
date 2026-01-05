@@ -8,8 +8,9 @@ load_dotenv()
 # Telegram Config
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
-if ADMIN_ID:
-    ADMIN_ID = int(ADMIN_ID)
+if not ADMIN_ID:
+    raise ValueError("ADMIN_ID not found in .env file")
+ADMIN_ID = int(ADMIN_ID)
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 if CHANNEL_ID:
     CHANNEL_ID = int(CHANNEL_ID)
