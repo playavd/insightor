@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import sys
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import FSInputFile
@@ -12,6 +13,8 @@ import pandas as pd
 from database import DATABASE_PATH
 import aiosqlite
 
+from logging.handlers import RotatingFileHandler
+
 # Logging Setup
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -19,7 +22,11 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(LOG_DIR / "insightor.log")
+        RotatingFileHandler(
+            LOG_DIR / "insightor.log",
+            maxBytes=100*1024, # ~100KB (approx 500 lines)
+            backupCount=1
+        )
     ]
 )
 
@@ -54,32 +61,49 @@ async def notify_user(notification_type: str, ad_data: dict):
             status = ad_data.get('ad_status', 'Basic')
             
             # Add emoji for status
-            status_emoji = "🔹"
-            if status == 'VIP': status_emoji = "🌟 VIP"
-            elif status == 'TOP': status_emoji = "🔥 TOP"
+            status_prefix = "🚗"
+            if status == 'VIP': status_prefix = "🌟 VIP"
+            elif status == 'TOP': status_prefix = "🔥 TOP"
             
+            # Format: PREFIX Title (link)
+            # 💰 Price  📏 Mileage
+            # ⛽ Fuel  ⚙️ Gear  🔧 Engine
+            # 👤 Seller (ID #123)
+            
+            seller_id = ad_data.get('user_id', '')
+            seller_info = seller
+            if seller_id:
+                # Clickable hashtag format: #id_12345
+                seller_info += f" (#id_{seller_id})"
+
             text = (
-                f"🚗 <b>New Ad Found</b> {status_emoji}\n"
-                f"<b>{title}</b>\n"
-                f"💰 <b>{ad_data['current_price']} €</b>\n\n"
-                f"📏 Mileage: {mileage}\n"
-                f"⛽ Fuel: {fuel}\n"
-                f"⚙️ Gearbox: {gear}\n"
-                f"🔧 Engine: {engine}\n"
-                f"👤 Seller: {seller}\n\n"
+                f"{status_prefix} <a href=\"{ad_data['ad_url']}\">{title}</a>\n"
+                f"💰 <b>{ad_data['current_price']} €</b>  📏 {mileage}\n"
+                f"⛽ {fuel}  ⚙️ {gear}  🔧 {engine}\n"
+                f"👤 {seller_info}"
+            )
+        elif notification_type == 'repost':
+            # REPOST Notification
+            text = (
+                f"🔄 <b>Ad Reposted!</b>\n"
+                f"The ad was bumped to the top.\n"
+                f"🔗 <a href=\"{ad_data['ad_url']}\">{ad_data['car_brand']} {ad_data['car_model']}</a>"
+            )
+        elif notification_type == 'status':
+            # STATUS Change Notification
+            old_status = ad_data.get('old_status', 'Unknown')
+            new_status = ad_data.get('ad_status', 'Unknown')
+            text = (
+                f"🚀 <b>Status Changed</b>\n"
+                f"{old_status} ➡️ <b>{new_status}</b>\n"
                 f"🔗 <a href=\"{ad_data['ad_url']}\">View Ad</a>"
             )
         elif notification_type == 'price':
-            text = (
-                f"📉 <b>Price Change</b>\n"
-                f"OLD: <s>{ad_data['old_price']} €</s>\n"
-                f"NEW: <b>{ad_data['current_price']} €</b>\n"
-                f"🔗 <a href=\"{ad_data['ad_url']}\">View Ad</a>"
-            )
-        # TODO: Add Repost Logic 
-        
+             # Disabled as per request
+             return
+
         target_id = CHANNEL_ID if CHANNEL_ID else ADMIN_ID
-        if target_id:
+        if target_id and text:
              await bot.send_message(target_id, text, parse_mode="HTML")
              
     except Exception as e:
@@ -91,7 +115,34 @@ async def scraper_job():
         return
         
     logger.info("Scheduler Trigger: Starting scraper cycle.")
-    await scraper.run_cycle(notify_callback=notify_user)
+    
+    # Notify Start
+    target_id = CHANNEL_ID if CHANNEL_ID else ADMIN_ID
+    if target_id:
+        try:
+             await bot.send_message(target_id, "🏁 <b>Scraper cycle started...</b>", parse_mode="HTML")
+        except Exception as e:
+             logger.error(f"Failed to send start msg: {e}")
+
+    # Run Cycle
+    new_ads_count = await scraper.run_cycle(notify_callback=notify_user)
+    
+    # Log Next Run
+    next_run = datetime.now() + timedelta(minutes=2)
+    next_run_str = next_run.strftime('%H:%M:%S')
+    logger.info(f"Cycle finished. Next run scheduled at: {next_run_str}")
+    
+    # Notify Finish
+    if target_id:
+        text = (
+            f"🏁 <b>Cycle Finished</b>\n"
+            f"✅ New Ads: {new_ads_count}\n"
+            f"⏰ Next Run: {next_run_str}"
+        )
+        try:
+            await bot.send_message(target_id, text, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Failed to send finish msg: {e}")
 
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram import F
@@ -111,13 +162,17 @@ async def cmd_start(message: types.Message):
     global STOP_PARSING
     STOP_PARSING = False
     
+    # Check if job exists, if not add it
     if not scheduler.get_job('scraper_job'):
-        scheduler.add_job(scraper_job, 'interval', minutes=10, id='scraper_job')
-        if not scheduler.running:
-            scheduler.start()
+        scheduler.add_job(scraper_job, 'interval', minutes=6, id='scraper_job')
+    if not scheduler.running:
+        scheduler.start()
         
-    asyncio.create_task(scraper_job())
-    await message.answer("✅ Bot started. Parsing initiated.", reply_markup=main_keyboard)
+    # Trigger immediate run if not running
+    if not scraper.is_running:
+        asyncio.create_task(scraper_job())
+        
+    await message.answer("✅ Bot started. Parsing initiated (Every 6 mins).", reply_markup=main_keyboard)
 
 @dp.message(F.text == "▶️ Start Scraper")
 async def btn_start(message: types.Message):

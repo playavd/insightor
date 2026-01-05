@@ -5,7 +5,7 @@ import random
 from bs4 import BeautifulSoup
 from datetime import datetime
 from config import BASE_URL, SEARCH_URL, REQUEST_DELAY_MIN, REQUEST_DELAY_MAX, MAX_CONSECUTIVE_UNCHANGED, MAX_PAGES_LIMIT, USER_AGENT_LIST
-from database import add_ad, get_ad, update_ad_price, update_ad_post_date, touch_ad
+from database import add_ad, get_ad, update_ad_price, update_ad_post_date, touch_ad, update_ad_status
 from dateparser import parse as parse_date
 
 logger = logging.getLogger(__name__)
@@ -159,11 +159,23 @@ class BazarakiScraper:
                 else:
                     status = 'Basic'
                 
+                # Extract Date (for repost detection)
+                date_tag = item.find(class_='list-simple__time')
+                post_date = None
+                if date_tag:
+                     # "Today 14:00", "Yesterday 10:00", "28.12.2025"
+                     date_str = date_tag.get_text(strip=True)
+                     try:
+                         post_date = parse_date(date_str)
+                     except:
+                         pass
+
                 ads.append({
                     'ad_id': ad_id,
                     'ad_url': full_url,
                     'price': price,
-                    'status': status
+                    'status': status,
+                    'post_date': post_date # Added date
                 })
             
         return ads
@@ -193,7 +205,9 @@ class BazarakiScraper:
         breadcrumb_tag = soup.find(attrs={"data-breadcrumbs": True})
         if breadcrumb_tag:
             bc_text = breadcrumb_tag['data-breadcrumbs']
-            parts = [p.strip() for p in bc_text.split('-')]
+            # Split by " - " (space hyphen space) to preserve names like "Mercedes-Benz" or "CX-60"
+            parts = [p.strip() for p in bc_text.split(' - ')]
+            
             # Usually: [Category, SubCategory, Brand, Model]
             # Cars path: "Motors", "Cars", Brand, Model
             
@@ -281,122 +295,163 @@ class BazarakiScraper:
         self.stop_signal = False
         page = 1
         consecutive_basic_unchanged = 0
+        new_ads_count = 0
         
         logger.info("Starting scraper cycle...")
         
-        while not self.stop_signal:
-            url = f"{SEARCH_URL}?page={page}"
-            logger.info(f"Fetching {url}")
-            
-            html = await self.fetch_page(url)
-            if not html:
-                logger.warning("Failed to fetch listing page, stopping cycle.")
-                break
+        try:
+            while not self.stop_signal:
+                url = f"{SEARCH_URL}?page={page}"
+                logger.info(f"Fetching {url}")
                 
-            ads = self.parse_listing_page(html)
-            if not ads:
-                logger.info("No ads found on page, end of pagination.")
-                break
-            
-            logger.info(f"Page {page}: Found {len(ads)} ads. Processing...")
-                
-            for i, ad in enumerate(ads):
-                if self.stop_signal:
+                html = await self.fetch_page(url)
+                if not html:
+                    logger.warning("Failed to fetch listing page, stopping cycle.")
                     break
                     
-                ad_id = ad['ad_id']
-                logger.info(f"Processing Ad {i+1}/{len(ads)}: ID {ad_id} | Status {ad['status']}")
-                current_price = ad['price']
-                ad_status = ad['status']
+                ads = self.parse_listing_page(html)
+                if not ads:
+                    logger.info("No ads found on page, end of pagination.")
+                    break
                 
-                existing_ad = await get_ad(ad_id)
-                
-                should_fetch_details = False
-                notification_type = None # 'new', 'price', 'repost'
-                
-                if not existing_ad:
-                    # NEW AD: Must fetch details
-                    should_fetch_details = True
-                    notification_type = 'new'
-                    if ad_status == 'Basic':
-                        consecutive_basic_unchanged = 0 
-                else:
-                    # EXISTING AD
-                    db_price = existing_ad['current_price']
+                logger.info(f"Page {page}: Found {len(ads)} ads. Processing...")
                     
-                    if current_price != db_price:
-                         # PRICE CHANGE
-                         # Optimization based on user feedback:
-                         # "you don't have to open ad page to update the price"
-                         # Update directly from list data + Notify
-                         await update_ad_price(ad_id, current_price)
-                         
-                         # Get updated object to send notification
-                         updated_ad = await get_ad(ad_id)
-                         updated_ad['old_price'] = db_price
-                         
-                         # Notify immediately (no detailed fetch)
-                         if notify_callback:
-                             await notify_callback('price', updated_ad)
-                             
-                         if ad_status == 'Basic':
-                            consecutive_basic_unchanged = 0
-                    else:
-                        # UNCHANGED
-                        await touch_ad(ad_id)
+                for i, ad in enumerate(ads):
+                    if self.stop_signal:
+                        break
+                        
+                    ad_id = ad['ad_id']
+                    logger.info(f"Processing Ad {i+1}/{len(ads)}: ID {ad_id} | Status {ad['status']}")
+                    current_price = ad['price']
+                    ad_status = ad['status']
+                    
+                    existing_ad = await get_ad(ad_id)
+                    
+                    should_fetch_details = False
+                    notification_type = None # 'new', 'price', 'repost'
+                    
+                    if not existing_ad:
+                        # NEW AD: Must fetch details
+                        should_fetch_details = True
+                        notification_type = 'new'
                         if ad_status == 'Basic':
-                            consecutive_basic_unchanged += 1
+                            consecutive_basic_unchanged = 0 
+                    else:
+                        # EXISTING AD
+                        db_price = existing_ad['current_price']
+                        db_status = existing_ad['ad_status']
+                        db_post_date_str = existing_ad['post_date']
+                        
+                        # Parse DB date to datetime if needed
+                        db_post_date = None
+                        if db_post_date_str:
+                             try:
+                                 if isinstance(db_post_date_str, str):
+                                     db_post_date = parse_date(db_post_date_str)
+                                 else:
+                                     db_post_date = db_post_date_str
+                             except:
+                                 pass
+                        
+                        # 1. PRICE CHECK
+                        if current_price != db_price:
+                             # PRICE CHANGE
+                             await update_ad_price(ad_id, current_price)
+                             # NO NOTIFICATION for price change as requested
+                             # Reset counter? Maybe. But user said "consider old ad not by price changing but the date changed"
+                             # So we DO NOT reset counter here necessarily, but usually a price change implies activity.
+                             # Let's be safe and reset it OR follow the strict request "don't count old ones".
+                             # If price changes, it's technically "updated", so we shouldn't count it as "unchanged old".
+                             consecutive_basic_unchanged = 0
+                             
+                        # 2. STATUS CHECK
+                        if ad_status != db_status:
+                             await update_ad_status(ad_id, ad_status)
+                             # Notify Status Change
+                             updated_ad = await get_ad(ad_id)
+                             updated_ad['old_status'] = db_status
+                             if notify_callback:
+                                 await notify_callback('status', updated_ad)
+                             consecutive_basic_unchanged = 0
+
+                        # 3. REPOST CHECK (Date changed)
+                        is_repost = False
+                        if ad['post_date'] and db_post_date:
+                            # Compare dates. If list date > db date + buffer (to avoid minute diffs)
+                            if ad['post_date'].date() > db_post_date.date():
+                                is_repost = True
+                            elif ad['post_date'].date() == db_post_date.date() and ad['post_date'] > db_post_date:
+                                # Same day, later time
+                                is_repost = True
+                        
+                        if is_repost:
+                             await update_ad_post_date(ad_id, ad['post_date'])
+                             # Notify Repost
+                             updated_ad = await get_ad(ad_id)
+                             if notify_callback:
+                                 await notify_callback('repost', updated_ad)
+                             consecutive_basic_unchanged = 0
+                        
+                        # 4. UNCHANGED
+                        # Logic: If NO price change, NO status change, NO repost -> It is truly unchanged
+                        if current_price == db_price and ad_status == db_status and not is_repost:
+                            await touch_ad(ad_id)
+                            if ad_status == 'Basic':
+                                consecutive_basic_unchanged += 1
+
+                    
+                    if should_fetch_details:
+                        # Fetch full details (Only for NEW ads now)
+                        details = await self.fetch_ad_details(ad['ad_url'])
+                        if details:
+                            # If status update found in details
+                            if details.get('ad_status_update'):
+                                ad_status = details['ad_status_update']
+
+                            # If New
+                            if notification_type == 'new':
+                                full_ad_data = {
+                                    'ad_id': ad_id,
+                                    'ad_url': ad['ad_url'],
+                                    'first_seen': datetime.now(),
+                                    'post_date': details['post_date'],
+                                    'initial_price': current_price,
+                                    'current_price': current_price,
+                                    'car_brand': details.get('car_brand'),
+                                    'car_model': details.get('car_model'),
+                                    'car_year': details.get('car_year'),
+                                    'gearbox': details.get('gearbox'),
+                                    'body_type': details.get('body_type'),
+                                    'fuel_type': details.get('fuel_type'),
+                                    'engine_size': details.get('engine_size'),
+                                    'drive_type': details.get('drive_type'),
+                                    'mileage': details.get('mileage'),
+                                    'user_name': details.get('user_name'),
+                                    'user_id': details.get('user_id'),
+                                    'is_business': details.get('is_business'),
+                                    'ad_status': ad_status
+                                }
+                                await add_ad(full_ad_data)
+                                new_ads_count += 1
+                                if notify_callback:
+                                    await notify_callback('new', full_ad_data)
+
+                        # Anti-ban delay ONLY if we fetched a page
+                        await asyncio.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
                 
-                if should_fetch_details:
-                    # Fetch full details (Only for NEW ads now)
-                    details = await self.fetch_ad_details(ad['ad_url'])
-                    if details:
-                        # If status update found in details
-                        if details.get('ad_status_update'):
-                            ad_status = details['ad_status_update']
-
-                        # If New
-                        if notification_type == 'new':
-                            full_ad_data = {
-                                'ad_id': ad_id,
-                                'ad_url': ad['ad_url'],
-                                'first_seen': datetime.now(),
-                                'post_date': details['post_date'],
-                                'initial_price': current_price,
-                                'current_price': current_price,
-                                'car_brand': details.get('car_brand'),
-                                'car_model': details.get('car_model'),
-                                'car_year': details.get('car_year'),
-                                'gearbox': details.get('gearbox'),
-                                'body_type': details.get('body_type'),
-                                'fuel_type': details.get('fuel_type'),
-                                'engine_size': details.get('engine_size'),
-                                'drive_type': details.get('drive_type'),
-                                'mileage': details.get('mileage'),
-                                'user_name': details.get('user_name'),
-                                'user_id': details.get('user_id'),
-                                'is_business': details.get('is_business'),
-                                'ad_status': ad_status
-                            }
-                            await add_ad(full_ad_data)
-                            if notify_callback:
-                                await notify_callback('new', full_ad_data)
-
-                    # Anti-ban delay ONLY if we fetched a page
-                    await asyncio.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
-            
-            # Check stop condition
-            if consecutive_basic_unchanged >= MAX_CONSECUTIVE_UNCHANGED:
-                logger.info(f"Stopping condition met: {consecutive_basic_unchanged} consecutive basic ads unchanged.")
-                break
-            
-            # Delay before fetching the next page
-            await asyncio.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
-            
-            page += 1
-            # Safety limit for pages (optional)
-            if page > MAX_PAGES_LIMIT:
-                break
+                # Check stop condition
+                if consecutive_basic_unchanged >= MAX_CONSECUTIVE_UNCHANGED:
+                    logger.info(f"Stopping condition met: {consecutive_basic_unchanged} consecutive basic ads unchanged.")
+                    break
+                
+                # Delay before fetching the next page
+                await asyncio.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
+                
+                page += 1
+                # Safety limit for pages (optional)
+                if page > MAX_PAGES_LIMIT:
+                    break
+        finally:
+            self.is_running = False
         
-        self.is_running = False
-        logger.info("Cycle finished.")
+        return new_ads_count
