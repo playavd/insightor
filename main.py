@@ -2,7 +2,7 @@ import asyncio
 import logging
 import sys
 from datetime import datetime, timedelta
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
 from aiogram.filters import Command
 from aiogram.types import FSInputFile
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -35,6 +35,24 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 scraper = BazarakiScraper()
+
+# Middleware for Access Control
+class AdminMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        # We only care about ensuring the user is the Admin
+        user = data.get('event_from_user')
+        if not user:
+            return await handler(event, data)
+            
+        if user.id != ADMIN_ID:
+            # If event is a message, we can reply
+            if isinstance(event, types.Message):
+                await event.answer("⛔ Access Denied. You are not authorized to use this bot.")
+            return # Stop processing
+            
+        return await handler(event, data)
+
+dp.message.middleware(AdminMiddleware())
 
 STOP_PARSING = False
 
