@@ -1,15 +1,43 @@
 import aiosqlite
 import asyncio
-from datetime import datetime
 import logging
+from datetime import datetime, date
+from typing import TypedDict, Optional, Any
+from pathlib import Path
+
 from config import DATABASE_PATH
 
 logger = logging.getLogger(__name__)
 
-# Global lock for DB writes
+# Global lock for DB writes to prevent race conditions during concurrent heavy loads
 db_lock = asyncio.Lock()
 
-async def init_db():
+class AdData(TypedDict):
+    ad_id: str
+    ad_url: str
+    first_seen: datetime
+    post_date: datetime | None
+    initial_price: int
+    current_price: int
+    car_brand: str | None
+    car_model: str | None
+    car_year: int | None
+    gearbox: str | None
+    body_type: str | None
+    fuel_type: str | None
+    engine_size: str | None
+    drive_type: str | None
+    mileage: int | None
+    user_name: str | None
+    user_id: str | None
+    is_business: bool | None
+    ad_status: str
+
+class Stats(TypedDict):
+    total_ads: int
+    new_today: int
+
+async def init_db() -> None:
     """Initialize the database and create tables if they don't exist."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.execute("""
@@ -39,36 +67,40 @@ async def init_db():
         await db.commit()
     logger.info("Database initialized.")
 
-async def add_ad(ad_data: dict):
+async def add_ad(ad_data: AdData) -> None:
     """Insert a new ad into the database."""
+    # Ensure datetimes are valid or None
+    params = ad_data.copy()
+    # Add last_checked as first_seen for new ads
+    params['last_checked'] = params['first_seen']
+
+    query = """
+        INSERT OR IGNORE INTO ads (
+            ad_id, ad_url, first_seen, post_date, initial_price, current_price,
+            car_brand, car_model, car_year, gearbox, body_type, fuel_type,
+            engine_size, drive_type, mileage, user_name, user_id, is_business,
+            ad_status, last_checked
+        ) VALUES (
+            :ad_id, :ad_url, :first_seen, :post_date, :initial_price, :current_price,
+            :car_brand, :car_model, :car_year, :gearbox, :body_type, :fuel_type,
+            :engine_size, :drive_type, :mileage, :user_name, :user_id, :is_business,
+            :ad_status, :last_checked
+        )
+    """
     async with db_lock:
         async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute("""
-                INSERT OR IGNORE INTO ads (
-                    ad_id, ad_url, first_seen, post_date, initial_price, current_price,
-                    car_brand, car_model, car_year, gearbox, body_type, fuel_type,
-                    engine_size, drive_type, mileage, user_name, user_id, is_business,
-                    ad_status, last_checked
-                ) VALUES (
-                    :ad_id, :ad_url, :first_seen, :post_date, :initial_price, :current_price,
-                    :car_brand, :car_model, :car_year, :gearbox, :body_type, :fuel_type,
-                    :engine_size, :drive_type, :mileage, :user_name, :user_id, :is_business,
-                    :ad_status, :first_seen
-                )
-            """, ad_data)
+            await db.execute(query, params)
             await db.commit()
 
-async def get_ad(ad_id: str):
+async def get_ad(ad_id: str) -> dict[str, Any] | None:
     """Retrieve an ad by its ID."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM ads WHERE ad_id = ?", (ad_id,)) as cursor:
             row = await cursor.fetchone()
-            if row:
-                return dict(row)
-            return None
+            return dict(row) if row else None
 
-async def update_ad_price(ad_id: str, new_price: int):
+async def update_ad_price(ad_id: str, new_price: int) -> None:
     """Update the current price of an ad."""
     async with db_lock:
         async with aiosqlite.connect(DATABASE_PATH) as db:
@@ -79,7 +111,7 @@ async def update_ad_price(ad_id: str, new_price: int):
             """, (new_price, datetime.now(), ad_id))
             await db.commit()
 
-async def update_ad_post_date(ad_id: str, new_post_date: datetime):
+async def update_ad_post_date(ad_id: str, new_post_date: datetime) -> None:
     """Update the post date of an ad (repost)."""
     async with db_lock:
         async with aiosqlite.connect(DATABASE_PATH) as db:
@@ -90,14 +122,7 @@ async def update_ad_post_date(ad_id: str, new_post_date: datetime):
             """, (new_post_date, datetime.now(), ad_id))
             await db.commit()
 
-async def touch_ad(ad_id: str):
-    """Update last_checked timestamp for an ad."""
-    async with db_lock:
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute("UPDATE ads SET last_checked = ? WHERE ad_id = ?", (datetime.now(), ad_id))
-            await db.commit()
-
-async def update_ad_status(ad_id: str, new_status: str):
+async def update_ad_status(ad_id: str, new_status: str) -> None:
     """Update the status of an ad (e.g., Basic -> VIP)."""
     async with db_lock:
         async with aiosqlite.connect(DATABASE_PATH) as db:
@@ -107,3 +132,31 @@ async def update_ad_status(ad_id: str, new_status: str):
                 WHERE ad_id = ?
             """, (new_status, datetime.now(), ad_id))
             await db.commit()
+
+async def touch_ad(ad_id: str) -> None:
+    """Update last_checked timestamp for an ad."""
+    async with db_lock:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            await db.execute("UPDATE ads SET last_checked = ? WHERE ad_id = ?", (datetime.now(), ad_id))
+            await db.commit()
+
+async def get_all_ads() -> list[dict[str, Any]]:
+    """Retrieve all ads for export."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM ads") as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+async def get_statistics() -> Stats:
+    """Get total ads count and new ads in the last 24 hours."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM ads") as cursor:
+            row = await cursor.fetchone()
+            total = row[0] if row else 0
+        
+        async with db.execute("SELECT COUNT(*) FROM ads WHERE first_seen > date('now', '-1 day')") as cursor:
+            row = await cursor.fetchone()
+            new_today = row[0] if row else 0
+            
+    return {"total_ads": total, "new_today": new_today}

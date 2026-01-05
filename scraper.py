@@ -3,9 +3,11 @@ import cloudscraper
 import logging
 import random
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, date
+from typing import Callable, Any
+
 from config import BASE_URL, SEARCH_URL, REQUEST_DELAY_MIN, REQUEST_DELAY_MAX, MAX_CONSECUTIVE_UNCHANGED, MAX_PAGES_LIMIT, USER_AGENT_LIST
-from database import add_ad, get_ad, update_ad_price, update_ad_post_date, touch_ad, update_ad_status
+from database import add_ad, get_ad, update_ad_price, update_ad_post_date, touch_ad, update_ad_status, AdData
 from dateparser import parse as parse_date
 
 logger = logging.getLogger(__name__)
@@ -22,36 +24,26 @@ class BazarakiScraper:
         self.stop_signal = False
         self.is_running = False
 
-    def get_random_user_agent(self):
+    def get_random_user_agent(self) -> str:
         return random.choice(USER_AGENT_LIST)
 
-    async def fetch_page(self, url: str):
+    async def fetch_page(self, url: str) -> str | None:
         """Fetch a page using cloudscraper in a thread."""
-        # Randomize UA slightly more or usage specific one
-        ua = self.get_random_user_agent()
         headers = {
-            "User-Agent": ua,
+            "User-Agent": self.get_random_user_agent(),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://www.google.com/",
             "Upgrade-Insecure-Requests": "1",
         }
         
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
-            # Tweak scraper instance if needed
-            # self.scraper.headers.update(headers) 
-            
             response = await loop.run_in_executor(None, lambda: self.scraper.get(url, headers=headers))
             
             if response.status_code == 403 or (response.status_code != 200 and ("challenge" in response.text.lower() or "cloudflare" in response.text.lower())):
                 logger.error(f"CRITICAL: Cloudflare Block or 403 Forbidden. Status: {response.status_code}")
-                # Dump for debugging
-                with open("debug_cf.html", "w", encoding="utf-8") as f:
-                    f.write(response.text)
                 return None
             
-            # Additional check: If 200 but title indicates block
             if "<title>Just a moment...</title>" in response.text:
                  logger.error(f"CRITICAL: Cloudflare Challenge Page Detected (Status 200)")
                  return None
@@ -61,172 +53,105 @@ class BazarakiScraper:
             logger.error(f"Error fetching {url}: {e}")
             return None
 
-    def parse_listing_page(self, html: str):
+    def parse_listing_page(self, html: str) -> list[dict[str, Any]]:
         """Parse the listing page and extract ad cards."""
         soup = BeautifulSoup(html, 'lxml')
-        
-        # There might be multiple list containers or one main one
-        # We look for all, but prioritize the main one if valid
         containers = soup.find_all(class_='list-simple__output')
+        
         if not containers:
-            logger.warning("No list-simple__output container found.")
             return []
         
         ads = []
-        for listing_container in containers:
-             # Items might be li or div
-             items = listing_container.find_all('li', recursive=False)
-             if not items:
-                 items = listing_container.find_all('div', recursive=False)
+        for container in containers:
+             items = container.find_all('li', recursive=False) or container.find_all('div', recursive=False)
              
              for item in items:
-                # Exclusion rules
                 classes = item.get('class', [])
                 if 'banner' in classes or 'ads-google' in classes:
                     continue
                     
-                # Find Link: usually .advert__content-title or just the first anchor
-                link_tag = item.find('a', class_='advert__content-title')
-                if not link_tag:
-                     link_tag = item.find('a', href=True)
-                
+                link_tag = item.find('a', class_='advert__content-title') or item.find('a', href=True)
                 if not link_tag:
                    continue
                 
                 href = link_tag['href']
-                if not href.startswith('/'):
-                    # External link or unexpected format
-                    # Check if it is a relative path starting with /adv/
-                    if '/adv/' not in href:
-                        continue
+                if not href.startswith('/') or '/adv/' not in href:
+                    continue
                 
+                # Extract ID
+                try:
+                    # /adv/123456_slug/ -> 123456
+                    ad_id = href.strip('/').split('/')[1].split('_')[0]
+                except IndexError:
+                    continue
+
                 full_url = f"{BASE_URL}{href}"
-                # /adv/12345/ -> 12345
-                parts = href.strip('/').split('/')
-                if len(parts) >= 2 and parts[0] == 'adv':
-                     # href is like /adv/12345_slug/
-                     raw_id = parts[1]
-                     # Extract just the number if it contains underscores
-                     if '_' in raw_id:
-                         ad_id = raw_id.split('_')[0]
-                     else:
-                         ad_id = raw_id
-                else:
-                     continue # Not an ad link
                 
-                # Extract basic info
+                # Extract Price
                 price = 0
-                # Price is often in .advert__content-price
-                price_tag = item.find(class_='advert__content-price')
-                if not price_tag:
-                    price_tag = item.find('p', class_='price') # Fallback
-                
+                price_tag = item.find(class_='advert__content-price') or item.find('p', class_='price')
                 if price_tag:
                      try:
-                        # Use separator to prevent joining of multiple prices (e.g. old and new)
-                        # "10 000 12 000" -> "10000|12000"
                         text = price_tag.get_text(separator='|', strip=True)
-                        parts = text.split('|')
-                        
-                        found_prices = []
-                        for part in parts:
-                             # Clean: remove € and whitespace, keep digits
-                             digits = ''.join(filter(str.isdigit, part))
-                             if digits:
-                                 found_prices.append(int(digits))
-                        
+                        # Extract all numbers from "10 000 | 12 000"
+                        found_prices = [int(''.join(filter(str.isdigit, p))) for p in text.split('|') if any(c.isdigit() for c in p)]
                         if found_prices:
-                            # If multiple prices found (e.g. discounted), current price is usually the lower one
-                            # or simply the last one? 
-                            # Safe bet: min price if discount, but sometimes maybe price range?
-                            # Bazaraki usually shows Old (High) -> New (Low).
                             price = min(found_prices)
-                            
                      except ValueError:
-                        price = 0
+                        pass
 
-                # Status Update
-                # Attribute might be on the item itself OR on a child
-                is_vip = item.has_attr('data-t-vip') or item.find(attrs={"data-t-vip": True})
-                
-                # For TOP, check classes on children
+                # Status
+                is_vip = item.has_attr('data-t-vip') or item.find(attrs={"data-t-vip": True}) or item.find(class_='ribbon-vip')
                 is_top = item.find(class_='label-top') or item.find(class_='ribbon-top') or item.find(class_='_top')
                 
-                if is_vip:
-                    status = 'VIP'
-                elif is_top:
-                    status = 'TOP'
-                else:
-                    status = 'Basic'
+                status = 'VIP' if is_vip else 'TOP' if is_top else 'Basic'
                 
-                # Extract Date (for repost detection)
+                # Date
                 date_tag = item.find(class_='list-simple__time')
-                post_date = None
-                if date_tag:
-                     # "Today 14:00", "Yesterday 10:00", "28.12.2025"
-                     date_str = date_tag.get_text(strip=True)
-                     try:
-                         post_date = parse_date(date_str)
-                     except:
-                         pass
+                post_date = parse_date(date_tag.get_text(strip=True)) if date_tag else None
+                
+                if not post_date:
+                    # Date missing on listing page, will handle in run_cycle
+                    pass
 
                 ads.append({
                     'ad_id': ad_id,
                     'ad_url': full_url,
                     'price': price,
                     'status': status,
-                    'post_date': post_date # Added date
+                    'post_date': post_date
                 })
             
         return ads
 
-    async def fetch_ad_details(self, url: str):
+    async def fetch_ad_details(self, url: str) -> dict[str, Any] | None:
         """Scrape details from the single ad page."""
         html = await self.fetch_page(url)
         if not html:
             return None
             
         soup = BeautifulSoup(html, 'lxml')
-        
-        details = {}
+        details: dict[str, Any] = {}
         
         # Post date
         date_span = soup.find('span', class_='date-meta')
         if date_span:
-            date_text = date_span.get_text(strip=True) # e.g. "Today 14:00"
-            dt = parse_date(date_text)
-            details['post_date'] = dt if dt else datetime.now()
-        else:
-            details['post_date'] = datetime.now()
+            details['post_date'] = parse_date(date_span.get_text(strip=True))
+        
+        if 'post_date' not in details or not details['post_date']:
+             # DO NOT use datetime.now() as it triggers false repost detection
+             details['post_date'] = None
 
-        # 1. Try to get Brand/Model from Breadcrumbs (more reliable)
-        # Format often: "Motors - Cars ... - Brand - Model"
-        # Found in debug: data-breadcrumbs='Motors - Cars - Mercedes-Benz - GLA-Class'
+        # Breadcrumbs for Brand/Model
         breadcrumb_tag = soup.find(attrs={"data-breadcrumbs": True})
         if breadcrumb_tag:
-            bc_text = breadcrumb_tag['data-breadcrumbs']
-            # Split by " - " (space hyphen space) to preserve names like "Mercedes-Benz" or "CX-60"
-            parts = [p.strip() for p in bc_text.split(' - ')]
-            
-            # Usually: [Category, SubCategory, Brand, Model]
-            # Cars path: "Motors", "Cars", Brand, Model
-            
-            # Filter out empty strings if any
-            parts = [p for p in parts if p]
-            
-            if len(parts) >= 3:
-                # Heuristic: If we know it's cars category (starts with Motors)
-                # Motors - Cars - Brand - Model
-                if 'Motors' in parts[0]:
-                    try:
-                         # Brand is usually index 2 (0=Motors, 1=Cars)
-                         if len(parts) > 2: details['car_brand'] = parts[2]
-                         # Model is usually index 3
-                         if len(parts) > 3: details['car_model'] = parts[3]
-                    except:
-                        pass
+            # "Motors - Cars - Brand - Model"
+            parts = [p.strip() for p in breadcrumb_tag['data-breadcrumbs'].split(' - ') if p.strip()]
+            if len(parts) >= 3 and 'Motors' in parts[0]:
+                 if len(parts) > 2: details['car_brand'] = parts[2]
+                 if len(parts) > 3: details['car_model'] = parts[3]
 
-        # 2. Specs extraction logic (Fallback + Extra Fields)
+        # Specs
         chars_list = soup.find('ul', class_='chars-column')
         if chars_list:
             for li in chars_list.find_all('li'):
@@ -237,7 +162,6 @@ class BazarakiScraper:
                     key = key_tag.get_text(strip=True).lower().replace(':', '')
                     val = val_tag.get_text(strip=True)
                     
-                    # Only overwrite if not set by breadcrumbs (or if breadcrumbs failed)
                     if 'brand' in key and not details.get('car_brand'): details['car_brand'] = val
                     elif 'model' in key and not details.get('car_model'): details['car_model'] = val
                     elif 'year' in key: 
@@ -247,15 +171,14 @@ class BazarakiScraper:
                     elif 'body type' in key: details['body_type'] = val
                     elif 'fuel type' in key: details['fuel_type'] = val
                     elif 'engine size' in key: details['engine_size'] = val
-                    elif 'drive type' in key or 'drive' in key: details['drive_type'] = val
+                    elif 'drive' in key: details['drive_type'] = val
                     elif 'mileage' in key:
                          try: details['mileage'] = int(val.lower().replace('km', '').replace(' ', ''))
                          except: details['mileage'] = 0
                          
-        # Determine seller info
+        # Seller Info
         author_div = soup.find('div', class_='author-name')
         if author_div:
-             # Check for image alt first (business)
              img = author_div.find('img')
              if img and img.get('alt'):
                  details['user_name'] = img.get('alt')
@@ -264,24 +187,14 @@ class BazarakiScraper:
                  details['user_name'] = author_div.get_text(strip=True)
                  details['is_business'] = False 
              
-             # Extract User ID from data-user attribute (Most Reliable)
              if author_div.get('data-user'):
                  details['user_id'] = author_div.get('data-user')
              else:
-                 # Fallback to link parsing if data-user missing
                  link = author_div.find('a', href=True) or author_div.parent.find('a', href=True)
                  if link:
-                     href = link['href'].strip('/') # c/carsdeals
-                     parts = href.split('/')
-                     if parts:
-                         details['user_id'] = parts[-1]
-        else:
-             details['user_name'] = "Unknown" 
-             details['is_business'] = False
-             
-        # Check for VIP/TOP in details (fallback for list parser)
-        # Sometimes list parser misses it. 
-        # Look for badges in the header or title area
+                     details['user_id'] = link['href'].strip('/').split('/')[-1]
+        
+        # Check Status in details
         if soup.find(class_='ribbon-vip') or soup.find(class_='label-vip'):
              details['ad_status_update'] = 'VIP'
         elif soup.find(class_='label-top'):
@@ -306,7 +219,6 @@ class BazarakiScraper:
                 
                 html = await self.fetch_page(url)
                 if not html:
-                    logger.warning("Failed to fetch listing page, stopping cycle.")
                     break
                     
                 ads = self.parse_listing_page(html)
@@ -321,14 +233,13 @@ class BazarakiScraper:
                         break
                         
                     ad_id = ad['ad_id']
-                    logger.info(f"Processing Ad {i+1}/{len(ads)}: ID {ad_id} | Status {ad['status']}")
+                    # logger.info(f"Processing Ad {i+1}/{len(ads)}: ID {ad_id} | Status {ad['status']}")
                     current_price = ad['price']
                     ad_status = ad['status']
                     
                     existing_ad = await get_ad(ad_id)
-                    
                     should_fetch_details = False
-                    notification_type = None # 'new', 'price', 'repost'
+                    notification_type = None
                     
                     if not existing_ad:
                         # NEW AD: Must fetch details
@@ -340,81 +251,59 @@ class BazarakiScraper:
                         # EXISTING AD
                         db_price = existing_ad['current_price']
                         db_status = existing_ad['ad_status']
-                        db_post_date_str = existing_ad['post_date']
-                        
-                        # Parse DB date to datetime if needed
-                        db_post_date = None
-                        if db_post_date_str:
-                             try:
-                                 if isinstance(db_post_date_str, str):
-                                     db_post_date = parse_date(db_post_date_str)
-                                 else:
-                                     db_post_date = db_post_date_str
-                             except:
-                                 pass
-                        
+                        db_post_date = existing_ad['post_date']
+                        if isinstance(db_post_date, str):
+                             try: db_post_date = parse_date(db_post_date)
+                             except: pass
+
                         # 1. PRICE CHECK
                         if current_price != db_price:
-                             # PRICE CHANGE
                              await update_ad_price(ad_id, current_price)
-                             # NO NOTIFICATION for price change as requested
-                             # Reset counter? Maybe. But user said "consider old ad not by price changing but the date changed"
-                             # So we DO NOT reset counter here necessarily, but usually a price change implies activity.
-                             # Let's be safe and reset it OR follow the strict request "don't count old ones".
-                             # If price changes, it's technically "updated", so we shouldn't count it as "unchanged old".
                              consecutive_basic_unchanged = 0
-                             
+                              
                         # 2. STATUS CHECK
                         if ad_status != db_status:
                              await update_ad_status(ad_id, ad_status)
-                             # Notify Status Change
                              updated_ad = await get_ad(ad_id)
                              updated_ad['old_status'] = db_status
                              if notify_callback:
                                  await notify_callback('status', updated_ad)
                              consecutive_basic_unchanged = 0
 
-                        # 3. REPOST CHECK (Date changed)
+                        # 3. REPOST CHECK (Only if date is visible)
                         is_repost = False
-                        if ad['post_date'] and db_post_date:
-                            # Compare dates. If list date > db date + buffer (to avoid minute diffs)
-                            if ad['post_date'].date() > db_post_date.date():
-                                is_repost = True
-                            elif ad['post_date'].date() == db_post_date.date() and ad['post_date'] > db_post_date:
-                                # Same day, later time
+                        current_post_date = ad.get('post_date')
+                        
+                        if current_post_date and db_post_date:
+                            if current_post_date > db_post_date:
                                 is_repost = True
                         
                         if is_repost:
-                             await update_ad_post_date(ad_id, ad['post_date'])
-                             # Notify Repost
+                             await update_ad_post_date(ad_id, current_post_date)
                              updated_ad = await get_ad(ad_id)
                              if notify_callback:
                                  await notify_callback('repost', updated_ad)
                              consecutive_basic_unchanged = 0
                         
                         # 4. UNCHANGED
-                        # Logic: If NO price change, NO status change, NO repost -> It is truly unchanged
                         if current_price == db_price and ad_status == db_status and not is_repost:
                             await touch_ad(ad_id)
                             if ad_status == 'Basic':
                                 consecutive_basic_unchanged += 1
-
+                    
                     
                     if should_fetch_details:
-                        # Fetch full details (Only for NEW ads now)
                         details = await self.fetch_ad_details(ad['ad_url'])
                         if details:
-                            # If status update found in details
                             if details.get('ad_status_update'):
                                 ad_status = details['ad_status_update']
 
-                            # If New
                             if notification_type == 'new':
-                                full_ad_data = {
+                                full_ad_data: AdData = {
                                     'ad_id': ad_id,
                                     'ad_url': ad['ad_url'],
                                     'first_seen': datetime.now(),
-                                    'post_date': details['post_date'],
+                                    'post_date': details.get('post_date'),
                                     'initial_price': current_price,
                                     'current_price': current_price,
                                     'car_brand': details.get('car_brand'),
@@ -444,11 +333,8 @@ class BazarakiScraper:
                     logger.info(f"Stopping condition met: {consecutive_basic_unchanged} consecutive basic ads unchanged.")
                     break
                 
-                # Delay before fetching the next page
                 await asyncio.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
-                
                 page += 1
-                # Safety limit for pages (optional)
                 if page > MAX_PAGES_LIMIT:
                     break
         finally:
