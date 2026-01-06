@@ -15,6 +15,11 @@ CHANNEL_ID = os.getenv("CHANNEL_ID")
 if CHANNEL_ID:
     CHANNEL_ID = int(CHANNEL_ID)
 
+USER_BOT_TOKEN = os.getenv("USER_BOT_TOKEN")
+
+# Alert Config
+MAX_ALERTS_BASIC = 5
+
 # Paths
 BASE_DIR = Path(__file__).resolve().parent
 DATABASE_PATH = BASE_DIR / "insightor.db"
