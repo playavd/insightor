@@ -212,16 +212,23 @@ async def get_statistics() -> Stats:
 def is_match(ad: AdData, filters: dict) -> bool:
     """Check if ad matches alert filters."""
     try:
-        # Brand
-        if filters.get('brand') and filters['brand'] != ad.get('car_brand'): return False
+        # Brand (Case Insensitive)
+        if filters.get('brand'):
+            f_brand = filters['brand'].lower()
+            a_brand = (ad.get('car_brand') or '').lower()
+            if f_brand != a_brand: return False
         
-        # Model
+        # Model (Case Insensitive, supports list)
         if filters.get('model'):
-             ad_model = ad.get('car_model', '')
+             ad_model = (ad.get('car_model') or '').lower()
              target_models = filters['model']
+             
              if isinstance(target_models, list):
-                 if ad_model not in target_models: return False
-             elif ad_model != target_models: return False
+                 # Check against lowercased list
+                 targets_lower = [str(x).lower() for x in target_models]
+                 if ad_model not in targets_lower: return False
+             else:
+                 if ad_model != str(target_models).lower(): return False
 
         # Years
         if filters.get('year_min') and (not ad.get('car_year') or ad['car_year'] < filters['year_min']): return False
@@ -243,13 +250,28 @@ def is_match(ad: AdData, filters: dict) -> bool:
              if not ad.get('engine_size'): return False
              if ad['engine_size'] > filters['engine_max']: return False
 
-        # Others
+        # Others (Exact match, Case Insensitive for safety)
         for field in ['gearbox', 'fuel_type', 'drive_type', 'body_type', 'car_color', 'ad_status']:
             filter_key = field if field != 'car_color' else 'color'
-            if filters.get(filter_key) and filters[filter_key] != ad.get(field): return False
+            f_val = filters.get(filter_key)
+            if f_val:
+                a_val = ad.get(field)
+                if not a_val: return False # If filter exists but ad property missing, mismatch
+                
+                # Special logic for ad_status = VIP+TOP
+                if field == 'ad_status' and str(f_val).upper() == "VIP+TOP":
+                    if str(a_val).upper() not in ["VIP", "TOP"]: return False
+                else:
+                    if str(f_val).lower() != str(a_val).lower(): return False
 
         # Business
         if filters.get('is_business') is not None and filters['is_business'] != ad.get('is_business'): return False
+        
+        # User ID
+        if filters.get('target_user_id'):
+            target = str(filters['target_user_id']).strip().lower()
+            ad_user = str(ad.get('user_id', '')).strip().lower()
+            if target != ad_user: return False
 
         return True
     except Exception as e:
@@ -282,14 +304,14 @@ def format_ad_message(ad_data: AdData, notification_type: str = 'new') -> str | 
         seller_id = ad_data.get('user_id', '')
         seller_info = seller
         if seller_id:
-            seller_info += f" (#id_{seller_id})"
+            seller_info += f" (#id{seller_id})"
 
         msg_text = ""
         if notification_type == 'new':
             msg_text = (
                 f"{status_prefix} <a href=\"{ad_data['ad_url']}\">{title}</a>\n"
-                f"💰 <b>{ad_data['current_price']} €</b>  📏 {mileage_str}\n"
-                f"⛽ {fuel}  ⚙️ {gear}  🔧 {engine}\n"
+                f"💰 <b>{ad_data['current_price']} €</b>  ⏱️ {mileage_str}\n"
+                f"⛽ {fuel}  ⚙️ {gear}  🧩 {engine}\n"
                 f"👤 {seller_info}"
             )
         elif notification_type == 'repost':
@@ -405,6 +427,30 @@ async def toggle_alert(alert_id: int, user_id: int, is_active: bool) -> None:
     async with db_lock:
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await db.execute("UPDATE alerts SET is_active = ? WHERE alert_id = ? AND user_id = ?", (is_active, alert_id, user_id))
+            await db.commit()
+
+async def get_active_alerts_count_by_user(user_id: int) -> int:
+    """Get precise count of active alerts for a user."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM alerts WHERE user_id = ? AND is_active = 1", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
+async def update_alert(alert_id: int, user_id: int, filters: dict) -> None:
+    """Update filters for an existing alert."""
+    import json
+    async with db_lock:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            await db.execute("UPDATE alerts SET filters = ? WHERE alert_id = ? AND user_id = ?", 
+                             (json.dumps(filters), alert_id, user_id))
+            await db.commit()
+
+async def rename_alert(alert_id: int, user_id: int, new_name: str) -> None:
+    """Rename an alert."""
+    async with db_lock:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            await db.execute("UPDATE alerts SET name = ? WHERE alert_id = ? AND user_id = ?", 
+                             (new_name, alert_id, user_id))
             await db.commit()
 
 async def get_active_alerts() -> list[dict[str, Any]]:

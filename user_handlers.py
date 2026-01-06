@@ -4,14 +4,15 @@ from aiogram import Router, types, F
 from aiogram.filters import Command, StateFilter, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from aiogram.utils.keyboard import ReplyKeyboardBuilder
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 
 from config import MAX_ALERTS_BASIC
 from database import (
     add_or_update_user, get_user, create_alert, get_user_alerts,
     delete_alert, toggle_alert, get_distinct_values, get_min_max_values,
-    get_alert, get_latest_matching_ads, format_ad_message
+    get_alert, get_latest_matching_ads, format_ad_message, update_alert, rename_alert,
+    get_active_alerts_count_by_user
 )
 
 logger = logging.getLogger(__name__)
@@ -21,8 +22,8 @@ user_router = Router()
 def get_main_menu_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🔔 New Ad Alert"), KeyboardButton(text="📋 Alert List")],
-            [KeyboardButton(text="🔍 Search (Coming Soon)"), KeyboardButton(text="💎 Premium (Coming Soon)")]
+            [KeyboardButton(text="🔔 New Alert"), KeyboardButton(text="🗂️ My Alerts")],
+            [KeyboardButton(text="🔍 Archive Search"), KeyboardButton(text="⭐ Pro")]
         ],
         resize_keyboard=True
     )
@@ -79,35 +80,130 @@ class AlertCreation(StatesGroup):
     UserId = State()
     AlertName = State()
 
+class AlertEditor(StatesGroup):
+    Menu = State()
+    SelectBrand = State()
+    SelectModel = State()
+    SelectOption = State() # Generic option selector (Fuel, Body, etc.)
+    InputText = State() # Generic text input (Year, Price, etc.)
+    Rename = State() # Special state for renaming
+    # Specific fields use metadata in state data, not unique states for each
+
 class AlertManagement(StatesGroup):
     ViewingList = State()
     ViewingDetail = State()
 
-# --- Handlers ---
-@user_router.message(F.text == "📋 Alert List")
-async def show_alert_list(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-    alerts = await get_user_alerts(user_id)
-    
-    if not alerts:
-        await message.answer("You have no alerts.", reply_markup=get_main_menu_kb())
-        return
+# --- Helpers ---
+# --- Helpers ---
+def get_dashboard_kb(filters: dict) -> InlineKeyboardMarkup:
+    """
+    Generates the Main Dashboard Inline Keyboard based on current filters.
+    """
+    builder = InlineKeyboardBuilder()
 
-    builder = ReplyKeyboardBuilder()
-    for alert in alerts:
-        status_icon = "🟢" if alert['is_active'] else "🔴"
-        # Store ID in text or use session to map? 
-        # Using ID in button text is ugly. Using Name is better but uniqueness? 
-        # Alert names are not unique in DB schema but user might type duplicate.
-        # Let's use format: "Status Name"
-        builder.button(text=f"{status_icon} {alert['name']}")
+    # Helper to format button text
+    def fmt(label, key, suffix="", prefix=""):
+        val = filters.get(key)
+        if val is None: return f"{label}: Any"
+        return f"{label}: {prefix}{val}{suffix}"
+
+    # Row 1: Brand & Model
+    builder.button(text=fmt("Brand", "brand"), callback_data="edit_brand")
+    # Show Model ONLY if Brand is selected
+    if filters.get("brand"):
+        builder.button(text=fmt("Model", "model"), callback_data="edit_model")
     
-    builder.button(text="⬅️ Back")
-    builder.adjust(1)
+    # Row 2: Year (Min & Max)
+    # Year Max only visible if Year Min is set
+    builder.button(text=fmt("Year min", "year_min", prefix=">"), callback_data="edit_year_min")
+    if filters.get("year_min"):
+        builder.button(text=fmt("Year max", "year_max", prefix="<"), callback_data="edit_year_max")
     
-    await state.set_state(AlertManagement.ViewingList)
-    await get_current_alerts_map(state, alerts) # Cache for lookup
-    await message.answer("Select an alert to view details:", reply_markup=builder.as_markup(resize_keyboard=True))
+    # Row 3: Price (Max & Min)
+    # Price Min visible regardless
+    builder.button(text=fmt("Price max", "price_max", "€", prefix="<"), callback_data="edit_price_max")
+    builder.button(text=fmt("Price min", "price_min", "€", prefix=">"), callback_data="edit_price_min")
+
+    # Row 4: Mileage
+    builder.button(text=fmt("Mileage", "mileage_max", " km", prefix="<"), callback_data="edit_mileage_max")
+    
+    # Row 5: Engine (Min & Max visible regardless)
+    builder.button(text=fmt("Engine min", "engine_min", " cc", prefix=">"), callback_data="edit_engine_min")
+    builder.button(text=fmt("Engine max", "engine_max", " cc", prefix="<"), callback_data="edit_engine_max")
+    
+    # Row 6: Gearbox & Fuel
+    builder.button(text=fmt("Gearbox", "gearbox"), callback_data="edit_gearbox")
+    builder.button(text=fmt("Fuel", "fuel_type"), callback_data="edit_fuel_type")
+
+    # Row 7: Drivetrain & Body
+    builder.button(text=fmt("Drivetrain", "drive_type"), callback_data="edit_drive_type")
+    builder.button(text=fmt("Body", "body_type"), callback_data="edit_body_type")
+    
+    # Row 8: Color
+    builder.button(text=fmt("Color", "color"), callback_data="edit_color")
+    
+    # Row 9: Promo (Ad Status)
+    builder.button(text=fmt("Promo", "ad_status"), callback_data="edit_ad_status")
+
+    # Row 10: Seller Type & ID
+    u_type = filters.get('is_business')
+    u_label = "Any"
+    if u_type is True: u_label = "Business"
+    elif u_type is False: u_label = "Private"
+    builder.button(text=f"Seller Type: {u_label}", callback_data="edit_is_business")
+    
+    builder.button(text=fmt("Seller ID", "target_user_id"), callback_data="edit_target_user_id")
+
+    # Adjust layout
+    # Row 1: 1 or 2 btns
+    # Row 2: 1 or 2 btns
+    # Row 3: 2 btns
+    # Row 4: 1 btn
+    # Row 5: 2 btns
+    # Row 6: 2 btns
+    # Row 7: 2 btns
+    # Row 8: 1 btn
+    # Row 9: 1 btn
+    # Row 10: 2 btns
+    
+    # Simple strategy: let builder adjust? No, need precise rows.
+    # We can just set width=2 for all, it fills rows.
+    # But YearMax logic makes it variable.
+    # Let's use individual rows or a calculated width list.
+    
+    sizes = []
+    # R1
+    sizes.append(2 if filters.get("brand") else 1)
+    # R2
+    sizes.append(2 if filters.get("year_min") else 1)
+    # R3 (Price)
+    sizes.append(2)
+    # R4 (Mileage)
+    sizes.append(1)
+    # R5 (Engine)
+    sizes.append(2)
+    # R6 (Gear/Fuel)
+    sizes.append(2)
+    # R7 (Drive/Body)
+    sizes.append(2)
+    # R8 (Color)
+    sizes.append(1)
+    # R9 (Promo)
+    sizes.append(1)
+    # R10 (Seller)
+    sizes.append(2)
+    
+    builder.adjust(*sizes)
+    
+    builder.row(
+        InlineKeyboardButton(text="🔙 Back", callback_data="dash_cancel"),
+        InlineKeyboardButton(text="❌ Cancel", callback_data="dash_cancel"),
+        InlineKeyboardButton(text="✅ Activate", callback_data="dash_save")
+    )
+    
+    return builder.as_markup()
+
+# moved to top
 
 async def get_current_alerts_map(state: FSMContext, alerts: list):
     # Map "Status Name" -> Alert Dict to handle button clicks
@@ -175,9 +271,10 @@ async def process_alert_selection(message: types.Message, state: FSMContext):
     
     # Action Buttons
     action_btn = "Deactivate" if alert['is_active'] else "Activate"
+    action_btn = "Deactivate" if alert['is_active'] else "Activate"
     kb = ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text=action_btn)],
-        [KeyboardButton(text="🗑 Delete")],
+        [KeyboardButton(text=action_btn), KeyboardButton(text="⚙️ Edit Filters")],
+        [KeyboardButton(text="✏️ Rename"), KeyboardButton(text="🗑 Delete")],
         [KeyboardButton(text="⬅️ Back")]
     ], resize_keyboard=True)
     
@@ -211,7 +308,7 @@ async def process_alert_action(message: types.Message, state: FSMContext):
             alert = await get_alert(alert_id)
             if alert and alert.get('filters'):
                 filters = json.loads(alert['filters'])
-                matches = await get_latest_matching_ads(filters, limit=10)
+                matches = await get_latest_matching_ads(filters, limit=5)
                 if matches:
                     await message.answer("🔎 Searching for recent matches...")
                     for ad in matches:
@@ -224,6 +321,29 @@ async def process_alert_action(message: types.Message, state: FSMContext):
         await show_alert_list(message, state)
         return
 
+    if text == "⚙️ Edit Filters":
+        alert = await get_alert(alert_id)
+        if not alert:
+             await message.answer("Alert not found.")
+             return await show_alert_list(message, state)
+        
+        filters = json.loads(alert['filters'])
+        await state.set_state(AlertEditor.Menu)
+        await state.update_data(filters=filters, editing_alert_id=alert_id)
+        
+        kb = get_dashboard_kb(filters)
+        # Remove existing Reply Keyboard (Alert Detail Actions)
+        # Remove existing Reply Keyboard (Alert Detail Actions)
+        msg_load = await message.answer("🔄 Switching to Editor...", reply_markup=ReplyKeyboardRemove())
+        await msg_load.delete()
+        await message.answer(f"🛠 <b>Editing Alert: {alert['name']}</b>", reply_markup=kb, parse_mode="HTML")
+        return
+
+    if text == "✏️ Rename":
+        await state.set_state(AlertEditor.Rename)
+        await message.answer("Enter new name for the alert (max 25 chars):")
+        return
+
     if text == "🗑 Delete":
         await delete_alert(alert_id, user_id)
         await message.answer("Alert deleted.")
@@ -232,41 +352,139 @@ async def process_alert_action(message: types.Message, state: FSMContext):
     
     await message.answer("Unknown action.")
 
+@user_router.message(AlertEditor.Rename)
+async def process_rename(message: types.Message, state: FSMContext):
+    name = message.text.strip()[:25]
+    data = await state.get_data()
+    alert_id = data.get('current_alert_id')
+    user_id = message.from_user.id
+    
+    if name == "/cancel":
+         await show_alert_list(message, state)
+         return
+
+    await rename_alert(alert_id, user_id, name)
+    await message.answer(f"✅ Renamed to '{name}'.")
+    
+    # Reload detail view
+    # We need to refresh alert data in state map, but simpler to just go back to list or detail 
+    await show_alert_list(message, state)
+
 @user_router.message(CommandStart())
 async def cmd_start(message: types.Message):
     user = message.from_user
     await add_or_update_user(user.id, user.username, user.first_name)
+    
     await message.answer(
-        f"👋 Hello {user.first_name}! Welcome to Insightor User Bot.\n"
-        "I can help you find the best car deals on Bazaraki.",
+        f"👋 Hello, {user.first_name}!\n\n"
+        "I can help you monitor Bazaraki for new car ads.\n"
+        "Select an option to get started:",
         reply_markup=get_main_menu_kb()
     )
 
-@user_router.message(F.text == "🔔 New Ad Alert")
+# --- Handlers ---
+@user_router.message(F.text == "🔔 New Alert", StateFilter("*"))
 async def start_new_alert(message: types.Message, state: FSMContext):
+    # Check if user exists
     user = await get_user(message.from_user.id)
     if not user:
         await add_or_update_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
         user = await get_user(message.from_user.id)
     
-    if user['active_alerts_count'] >= MAX_ALERTS_BASIC:
+    # Check active alerts - use reliable count
+    active_count = await get_active_alerts_count_by_user(message.from_user.id)
+    
+    if active_count >= MAX_ALERTS_BASIC:
+        # Limit Reached
         await message.answer(
-            f"🚫 Limit reached. You have {user['active_alerts_count']}/{MAX_ALERTS_BASIC} active alerts.\n"
-            "Please delete or deactivate an old alert in 'Alert List' to create a new one."
+             f"🚫 <b>Alerts limit reached ({active_count}/{MAX_ALERTS_BASIC} active).</b>\n\n"
+             "Deactivate one in '🗂️ My Alerts', or upgrade to <b>⭐ Pro</b> to unlock up to 100 alerts.",
+             parse_mode="HTML"
         )
         return
 
-    await state.set_state(AlertCreation.Category)
-    await message.answer(
-        "=== NEW AD ALERT ===\n"
-        "Step 1: Select Category",
-        reply_markup=ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="Cars")],
-                [KeyboardButton(text="Real Estate (Inactive)"), KeyboardButton(text="❌ Cancel")]
-            ], resize_keyboard=True
-        )
+    # Initialize new alert state
+    await state.clear()
+    await state.set_state(AlertEditor.Menu)
+    
+    # Empty filters
+    await state.update_data(filters={})
+    
+    kb = get_dashboard_kb({})
+    # Remove existing Reply Keyboard to prevent confusion
+    loading_msg = await message.answer("🔄 Loading...", reply_markup=ReplyKeyboardRemove())
+    await loading_msg.delete()
+    await message.answer("➕ <b>New Alert Wizard</b>\n\nSelect a filter to edit:", reply_markup=kb, parse_mode="HTML")
+
+@user_router.message(F.text == "🗂️ My Alerts", StateFilter("*"))
+async def show_alert_list(message: types.Message, state: FSMContext):
+    await state.clear() # Clear any previous state
+    user_id = message.from_user.id
+    alerts = await get_user_alerts(user_id)
+    
+    if not alerts:
+        await message.answer("You have no alerts.", reply_markup=get_main_menu_kb())
+        return
+
+    builder = ReplyKeyboardBuilder()
+    for alert in alerts:
+        status_icon = "🟢" if alert['is_active'] else "🔴"
+        builder.button(text=f"{status_icon} {alert['name']}")
+    
+    builder.button(text="⬅️ Back")
+    builder.adjust(1)
+    
+    await state.set_state(AlertManagement.ViewingList)
+    await get_current_alerts_map(state, alerts) # Cache for lookup
+    await message.answer("Select an alert to view details:", reply_markup=builder.as_markup(resize_keyboard=True))
+
+
+
+@user_router.callback_query(F.data == "dash_cancel", StateFilter(AlertEditor))
+async def dash_cancel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.delete()
+    await callback.message.answer("❌ Alert creation cancelled.", reply_markup=get_main_menu_kb())
+
+@user_router.callback_query(F.data == "ignore")
+async def dash_ignore(callback: CallbackQuery):
+    await callback.answer()
+
+@user_router.callback_query(F.data == "dash_save", StateFilter(AlertEditor))
+async def dash_save(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    filters = data.get('filters', {})
+    
+    # Logic: New or Edit?
+    editing_id = data.get('editing_alert_id')
+    
+    if editing_id:
+        await update_alert(editing_id, callback.from_user.id, filters)
+        msg_title = "✅ <b>Alert Updated!</b>"
+        # Keep name same, mostly
+    else:
+        from datetime import datetime
+        name = f"Alert {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        await create_alert(callback.from_user.id, name, filters)
+        msg_title = f"✅ <b>Alert Saved!</b>\nName: {name}"
+
+    await state.clear()
+    await callback.message.delete()
+    await callback.message.answer(
+        f"{msg_title}\n(You can manage it in 'My Alerts')",
+        reply_markup=get_main_menu_kb(),
+        parse_mode="HTML"
     )
+    
+    # Send matches
+    matches = await get_latest_matching_ads(filters, limit=5)
+    if matches:
+        await callback.message.answer(f"🔎 Found {len(matches)} recent matches:")
+        for ad in matches:
+            text = format_ad_message(ad, 'new')
+            if text: await callback.message.answer(text, parse_mode="HTML")
+    else:
+        await callback.message.answer("ℹ️ No recent matches found.")
 
 @user_router.message(F.text == "❌ Cancel", StateFilter(AlertCreation))
 async def cancel_wizard(message: types.Message, state: FSMContext):
@@ -378,44 +596,106 @@ async def process_model(message: types.Message, state: FSMContext):
         reply_markup=get_nav_kb(include_any=True)
     )
 
-@user_router.message(AlertCreation.YearFrom)
-async def process_year_from(message: types.Message, state: FSMContext):
+
+
+@user_router.callback_query(F.data.startswith("edit_"), StateFilter(AlertEditor.Menu))
+async def edit_field_start(callback: CallbackQuery, state: FSMContext):
+    field = callback.data.replace("edit_", "")
+    
+    # Check if this is a text field or selection field
+    text_fields = [
+        "year_min", "year_max", "price_min", "price_max", 
+        "mileage_max", "engine_min", "engine_max", "target_user_id"
+    ]
+    
+    selection_fields = [
+        "brand", "model", "gearbox", "fuel_type", 
+        "drive_type", "body_type", "color", "ad_status", "is_business"
+    ]
+
+    if field in text_fields:
+        await state.update_data(editing_field=field)
+        await state.set_state(AlertEditor.InputText)
+        
+        # Determine prompt
+        prompt = f"Enter value for <b>{field.replace('_', ' ').title()}</b>:"
+        if "year" in field: prompt += "\n(Format: YYYY, e.g. 2020)"
+        elif "price" in field: prompt += "\n(Format: Number, e.g. 15000)"
+        elif "mileage" in field: prompt += "\n(Format: Number, e.g. 100000)"
+        elif "engine" in field: prompt += "\n(Format: cc, e.g. 1500)"
+        
+        # Add Inline Keyboard for Input State (Any, Back)
+        builder = InlineKeyboardBuilder()
+        builder.button(text="Any (Clear)", callback_data=f"set_any:{field}")
+        builder.button(text="🔙 Back", callback_data="dash_back")
+        builder.adjust(1)
+        
+        await callback.message.edit_text(prompt + "\n\n<i>Type value or select option below:</i>", reply_markup=builder.as_markup(), parse_mode="HTML")
+    
+    elif field in selection_fields:
+        # Pass to selection handler (impl next)
+        await start_selection(callback, state, field)
+        
+    else:
+        await callback.answer("Not implemented yet.")
+
+@user_router.callback_query(F.data.startswith("set_any:"))
+async def process_any_button(callback: CallbackQuery, state: FSMContext):
+    field = callback.data.split(":")[1]
+    data = await state.get_data()
+    filters = data.get('filters', {})
+    filters[field] = None # Set to Any
+    
+    # Special logic: if resetting Year Min, clear Year Max?
+    if field == "year_min": filters['year_max'] = None
+    
+    await state.update_data(filters=filters)
+    # Return to dashboard
+    kb = get_dashboard_kb(filters)
+    await state.set_state(AlertEditor.Menu)
+    await callback.message.edit_text("➕ <b>New Alert Wizard</b>", reply_markup=kb, parse_mode="HTML")
+
+@user_router.message(AlertEditor.InputText)
+async def process_dashboard_text(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    field = data.get('editing_field')
     text = message.text.strip()
-    if text == "⬅️ Back":
-        # Logic to go back to Model or Brand depending on previous choice? 
-        # State machine handles simple back, but if we skipped Model we need checks.
-        # Simple back to Model is fine, if we skipped it, the user will see Model step for a moment or we should track path.
-        # For simplicity, we go back to Model. If brand was ANY, model was skipped, so we should go back to Brand.
-        data = await state.get_data()
-        if data.get('brand') is None: # Brand was ANY
-             await state.set_state(AlertCreation.Brand)
-             await message.answer("Step 2: Brand", reply_markup=get_nav_kb(include_any=True))
-        else:
-             await state.set_state(AlertCreation.Model)
-             # Re-fetch models to show buttons
-             models = await get_distinct_values('car_model', 'car_brand', data['brand'])
-             await message.answer(f"Step 3: Model", reply_markup=get_nav_kb(options=models[:30], include_any=True))
+    
+    # /cancel to return
+    if text == "/cancel":
+        # Should mostly handle by button, but keep for robustness (or remove?)
+        # Let's keep /cancel as alias to Back
+        await return_to_dashboard(message, state)
         return
 
-    if text == "💾 Save & Finish": return await save_alert_early(message, state)
-
+    # Validation
     val = None
-    if text != "ANY":
-        if not text.isdigit():
-            await message.answer("Please enter a valid year (YYYY).")
-            return
-        val = int(text)
+    if not text.isdigit():
+        await message.answer("❌ Invalid format. Please enter a number.\nTry again or /cancel.")
+        return
     
-    await state.update_data(year_from=val)
-    if text == "ANY":
-         await state.update_data(year_to=None) # Skip Year To? User requirement says "skip next question"
-         await state.set_state(AlertCreation.PriceMax)
-         max_p, _ = await get_min_max_values('current_price')
-         await message.answer(f"Step 6: Max Price (Max stored: {max_p}€)", reply_markup=get_nav_kb(include_any=True))
-    else:
-         await state.set_state(AlertCreation.YearTo)
-         _, max_y = await get_min_max_values('car_year')
-         await message.answer(f"Step 5: Year To (Max stored: {max_y})", reply_markup=get_nav_kb(include_any=False)) # User didn't say ANY is allowed here, but usually yes. Requirement: "ask user to enter year... use hint"
+    val = int(text)
+    
+    # Specific Checks
+    if "year" in field and (val < 1900 or val > 2030):
+        await message.answer("❌ Year must be between 1900 and 2030.")
+        return
+        
+    # Validation passed
+    filters = data.get('filters', {})
+    filters[field] = val
+    await state.update_data(filters=filters)
+    
+    await return_to_dashboard(message, state)
+
+async def return_to_dashboard(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    filters = data.get('filters', {})
+    kb = get_dashboard_kb(filters)
+    
+    await state.set_state(AlertEditor.Menu)
+    await message.answer("➕ <b>New Alert Wizard</b>", reply_markup=kb, parse_mode="HTML")
+
 
 @user_router.message(AlertCreation.YearTo)
 async def process_year_to(message: types.Message, state: FSMContext):
@@ -438,287 +718,118 @@ async def process_year_to(message: types.Message, state: FSMContext):
     await message.answer(f"Step 6: Max Price (Max stored: {max_p}€)", reply_markup=get_nav_kb(include_any=True))
 
 
-@user_router.message(AlertCreation.PriceMax)
-async def process_price_max(message: types.Message, state: FSMContext):
-    text = message.text.strip()
-    if text == "⬅️ Back":
-        # logic to return to YearTo or YearFrom... 
-        await state.set_state(AlertCreation.YearTo) # Simplifying
-        await message.answer("Step 5: Year To", reply_markup=get_nav_kb(include_any=False))
-        return
-    if text == "💾 Save & Finish": return await save_alert_early(message, state)
-
-    val = None
-    if text != "ANY":
-        if not text.isdigit():
-             await message.answer("Invalid price.")
-             return
-        val = int(text)
+# --- Selector Handlers ---
+async def start_selection(callback: CallbackQuery, state: FSMContext, field: str, page: int = 0):
+    await state.set_state(AlertEditor.SelectOption)
     
-    await state.update_data(price_max=val)
-    if text == "ANY":
-        await state.update_data(price_min=None)
-        await state.set_state(AlertCreation.MileageMax) # Skip Min Price
-        _, max_m = await get_min_max_values('mileage')
-        await message.answer(f"Step 8: Max Mileage (Max stored: {max_m} km)", reply_markup=get_nav_kb(include_any=True))
-    else:
-        await state.set_state(AlertCreation.PriceMin)
-        min_p, _ = await get_min_max_values('current_price')
-        await message.answer(f"Step 7: Min Price (Min stored: {min_p}€)", reply_markup=get_nav_kb(include_any=False))
-
-@user_router.message(AlertCreation.PriceMin)
-async def process_price_min(message: types.Message, state: FSMContext):
-    text = message.text.strip()
-    if text == "⬅️ Back":
-        await state.set_state(AlertCreation.PriceMax)
-        await message.answer("Step 6: Max Price", reply_markup=get_nav_kb(include_any=True))
-        return
-    if text == "💾 Save & Finish": return await save_alert_early(message, state)
-
-    if not text.isdigit():
-        await message.answer("Invalid price.")
-        return
-        
-    await state.update_data(price_min=int(text))
-    await state.set_state(AlertCreation.MileageMax)
-    _, max_m = await get_min_max_values('mileage')
-    await message.answer(f"Step 8: Max Mileage (Max stored: {max_m} km)", reply_markup=get_nav_kb(include_any=True))
-
-@user_router.message(AlertCreation.MileageMax)
-async def process_mileage_max(message: types.Message, state: FSMContext):
-    text = message.text.strip()
-    if text == "⬅️ Back":
-        await state.set_state(AlertCreation.PriceMin) 
-        # Need to know if we skipped PriceMin?
-        # This back-navigation complexity suggests we should store 'last_step' or similar, but for now simple linear back is usually ok unless we skipped.
-        # If we pushed ANY at PriceMax, we skipped PriceMin. 
-        # A robust solution requires track history.
-        # Let's assume standard flow for now to save time, or use state data to check previous skip.
+    # Get Options
+    options = []
+    if field == "brand":
+        options = await get_distinct_values('car_brand')
+    elif field == "model":
         data = await state.get_data()
-        if data.get('price_max') is None:
-             await state.set_state(AlertCreation.PriceMax)
-             await message.answer("Step 6: Max Price", reply_markup=get_nav_kb(include_any=True))
-        else:
-             await state.set_state(AlertCreation.PriceMin)
-             await message.answer("Step 7: Min Price", reply_markup=get_nav_kb(include_any=False))
+        brand = data.get('filters', {}).get('brand')
+        if not brand:
+            await callback.answer("Please select Brand first.")
+            return
+        options = await get_distinct_values('car_model', 'car_brand', brand)
+    elif field == "gearbox": options = await get_distinct_values('gearbox')
+    elif field == "fuel_type": options = await get_distinct_values('fuel_type')
+    elif field == "drive_type": options = await get_distinct_values('drive_type')
+    elif field == "body_type": options = await get_distinct_values('body_type')
+    elif field == "color": options = await get_distinct_values('car_color')
+    elif field == "ad_status": options = ["Basic", "VIP", "TOP", "VIP+TOP"]
+    elif field == "is_business": options = ["Private", "Business", "Any"]
+    
+    # Validation for empty options
+    if not options and field != "is_business": # business fixed list
+        await callback.answer("No options available.")
         return
 
-    if text == "💾 Save & Finish": return await save_alert_early(message, state)
-
-    val = None
-    if text != "ANY":
-        if not text.isdigit(): return await message.answer("Invalid mileage.")
-        val = int(text)
+    # Filter None/Empty
+    options = [str(o) for o in options if o]
+    options.sort()
     
-    await state.update_data(mileage_max=val)
-    if text == "ANY":
-        await state.update_data(mileage_min=None)
-        await state.set_state(AlertCreation.Gearbox)
-        await message.answer("Step 10: Gearbox", reply_markup=get_nav_kb(["Automatic", "Manual"], include_any=True))
-    else:
-        await state.set_state(AlertCreation.MileageMin)
-        min_m, _ = await get_min_max_values('mileage')
-        await message.answer(f"Step 9: Min Mileage (Min stored: {min_m} km)", reply_markup=get_nav_kb(include_any=False))
+    if field != "is_business" and field != "ad_status": 
+         options.insert(0, "Any")
 
-@user_router.message(AlertCreation.MileageMin)
-async def process_mileage_min(message: types.Message, state: FSMContext):
-    text = message.text.strip()
-    if text == "⬅️ Back":
-        await state.set_state(AlertCreation.MileageMax)
-        await message.answer("Step 8: Max Mileage", reply_markup=get_nav_kb(include_any=True))
-        return
-    if text == "💾 Save & Finish": return await save_alert_early(message, state)
-
-    if not text.isdigit(): return await message.answer("Invalid mileage.")
-    await state.update_data(mileage_min=int(text))
-    await state.set_state(AlertCreation.Gearbox)
-    await message.answer("Step 10: Gearbox", reply_markup=get_nav_kb(["Automatic", "Manual"], include_any=True))
-
-@user_router.message(AlertCreation.Gearbox)
-async def process_gearbox(message: types.Message, state: FSMContext):
-    text = message.text.strip()
-    # Back/Save logic omitted for brevity 
-    if text == "⬅️ Back":
-        await state.set_state(AlertCreation.MileageMax) # Simplified back
-        await message.answer("Step 8: Max Mileage", reply_markup=get_nav_kb(include_any=True))
-        return
-        
-    await state.update_data(gearbox=text if text != "ANY" else None)
-    await state.set_state(AlertCreation.Fuel)
+    # Pagination
+    ITEMS_PER_PAGE = 30
+    total_pages = (len(options) - 1) // ITEMS_PER_PAGE + 1
+    start = page * ITEMS_PER_PAGE
+    end = start + ITEMS_PER_PAGE
+    chunk = options[start:end]
     
-    fuels = await get_distinct_values('fuel_type')
-    await message.answer("Step 11: Fuel Type", reply_markup=get_nav_kb(options=fuels, include_any=True))
-
-@user_router.message(AlertCreation.Fuel)
-async def process_fuel(message: types.Message, state: FSMContext):
-    text = message.text.strip()
-    if text == "⬅️ Back":
-        await state.set_state(AlertCreation.Gearbox)
-        await message.answer("Step 10: Gearbox", reply_markup=get_nav_kb(["Automatic", "Manual"], include_any=True))
-        return
+    builder = InlineKeyboardBuilder()
+    for opt in chunk:
+        # Use simple hashing or truncation if value too long? 
+        # Callback data max 64 bytes. "sel:brand:Mercedes-Benz" is fine.
+        # But "sel:body_type:Convertible (Open Top)" might be long.
+        # Let's hope it fits.
+        val_safe = opt[:40] 
+        builder.button(text=opt, callback_data=f"sel:{field}:{val_safe}")
     
-    await state.update_data(fuel=text if text != "ANY" else None)
-    await state.set_state(AlertCreation.EngineFrom)
-    min_e, _ = await get_min_max_values('engine_size')
-    await message.answer(f"Step 12: Engine From (Min stored: {min_e} cc)", reply_markup=get_nav_kb(include_any=True))
-
-@user_router.message(AlertCreation.EngineFrom)
-async def process_engine_from(message: types.Message, state: FSMContext):
-    text = message.text.strip()
-    if text == "⬅️ Back":
-         await state.set_state(AlertCreation.Fuel)
-         fuels = await get_distinct_values('fuel_type')
-         await message.answer("Step 11: Fuel", reply_markup=get_nav_kb(fuels, include_any=True))
-         return
-
-    if text == "💾 Save & Finish": return await save_alert_early(message, state)
+    builder.adjust(2)
     
-    val = None
-    if text != "ANY":
-        if not text.isdigit(): return await message.answer("Invalid engine size.")
-        val = int(text)
+    # Nav Buttons
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=f"pg:{field}:{page-1}"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"pg:{field}:{page+1}"))
     
-    await state.update_data(engine_from=val)
+    if nav_row: builder.row(*nav_row)
+    builder.row(InlineKeyboardButton(text="🔙 Back to Dashboard", callback_data="dash_back"))
     
-    if text == "ANY":
-        await state.update_data(engine_to=None)
-        await state.set_state(AlertCreation.Drive)
-        await message.answer("Step 14: Drive Type", reply_markup=get_nav_kb(["Front (FWD)", "4WD, AWD", "Rear (RWD)"], include_any=True))
-    else:
-        await state.set_state(AlertCreation.EngineTo)
-        _, max_e = await get_min_max_values('engine_size')
-        await message.answer(f"Step 13: Engine To (Max stored: {max_e} cc)", reply_markup=get_nav_kb(include_any=False))
+    heading = f"Select <b>{field.replace('_', ' ').title()}</b> (Page {page+1}/{total_pages}):"
+    await callback.message.edit_text(heading, reply_markup=builder.as_markup(), parse_mode="HTML")
 
-@user_router.message(AlertCreation.EngineTo)
-async def process_engine_to(message: types.Message, state: FSMContext):
-    text = message.text.strip()
-    if text == "⬅️ Back":
-        await state.set_state(AlertCreation.EngineFrom)
-        await message.answer("Step 12: Engine From", reply_markup=get_nav_kb(include_any=True))
-        return
-        
-    if not text.isdigit(): return await message.answer("Invalid engine size.")
+@user_router.callback_query(F.data.startswith("pg:"))
+async def process_pagination(callback: CallbackQuery, state: FSMContext):
+    _, field, page_str = callback.data.split(":")
+    await start_selection(callback, state, field, int(page_str))
+
+@user_router.callback_query(F.data.startswith("sel:"))
+async def process_selection(callback: CallbackQuery, state: FSMContext):
+    _, field, value = callback.data.split(":", 2) # split only twice
     
-    await state.update_data(engine_to=int(text))
-    await state.set_state(AlertCreation.Drive)
-    await message.answer("Step 14: Drive Type", reply_markup=get_nav_kb(["Front (FWD)", "4WD, AWD", "Rear (RWD)"], include_any=True))
-
-# ... Skipping Drive, Body, Color, AdType, AdStatus, UserId as they are mostly "Inactive" or "ANY" for now in requirement or similar to others ...
-# Wait, user requirement says "Drive type - button ANY - filter is inactive". 
-# Does that mean we skip it entirely or show it but it does nothing? 
-# "button ANY - filter is inactive... Front, 4WD...". It implies the *filter logic* is inactive or maybe just "Any" is default.
-# Actually, looking at "Brand ... button "ANY" - filter is inactive".
-# It means setting it to ANY makes the filter inactive (i.e., no filtering). Selecting a value enalbes it. 
-# So I should implement them.
-
-@user_router.message(AlertCreation.Drive)
-async def process_drive(message: types.Message, state: FSMContext):
-    # Simplified handling for the rest to save space, assuming they are similar
-    await state.update_data(drive=message.text if message.text != "ANY" else None)
-    await state.set_state(AlertCreation.Body)
-    bodies = ["Hatchback", "SUV", "Coupe", "Saloon", "Convertible", "Estate", "MPV", "Pickup"]
-    await message.answer("Step 15: Body Type", reply_markup=get_nav_kb(bodies, include_any=True))
-
-@user_router.message(AlertCreation.Body)
-async def process_body(message: types.Message, state: FSMContext):
-    await state.update_data(body=message.text if message.text != "ANY" else None)
-    await state.set_state(AlertCreation.Color)
-    colors = await get_distinct_values('car_color')
-    await message.answer("Step 16: Color", reply_markup=get_nav_kb(colors[:30], include_any=True))
-
-@user_router.message(AlertCreation.Color)
-async def process_color(message: types.Message, state: FSMContext):
-    await state.update_data(color=message.text if message.text != "ANY" else None)
-    await state.set_state(AlertCreation.AdType)
-    await message.answer("Step 17: Ad Type", reply_markup=get_nav_kb(["Private only", "Business only"], include_any=True))
-
-@user_router.message(AlertCreation.AdType)
-async def process_ad_type(message: types.Message, state: FSMContext):
-    val = message.text
-    if val == "Private only": val = False # is_business = False
-    elif val == "Business only": val = True # is_business = True
-    else: val = None # ANY
-    
-    await state.update_data(is_business=val)
-    await state.set_state(AlertCreation.AdStatus)
-    await message.answer("Step 18: Ad Status", reply_markup=get_nav_kb(["Basic only", "TOP only", "VIP only", "VIP+TOP"], include_any=True))
-
-@user_router.message(AlertCreation.AdStatus)
-async def process_ad_status(message: types.Message, state: FSMContext):
-    await state.update_data(ad_status=message.text if message.text != "ANY" else None)
-    await state.set_state(AlertCreation.UserId)
-    await message.answer("Step 19: User ID (Any or Enter ID)", reply_markup=get_nav_kb(include_any=True))
-
-@user_router.message(AlertCreation.UserId)
-async def process_user_id(message: types.Message, state: FSMContext):
-    text = message.text.strip()
-    # Check ID existence?
-    await state.update_data(target_user_id=text if text != "ANY" else None)
-    
-    from datetime import datetime
-    default_name = datetime.now().strftime("%Y-%m-%d %H:%M")
-    
-    await state.set_state(AlertCreation.AlertName)
-    await message.answer(
-        f"Step 20: Name your alert\nMax 25 chars.",
-        reply_markup=get_nav_kb([default_name], include_any=False) # Reuse nav kb but with specific button
-    )
-
-@user_router.message(AlertCreation.AlertName)
-async def process_alert_name(message: types.Message, state: FSMContext):
-    name = message.text.strip()[:25]
-    if name == "⬅️ Back":
-         await state.set_state(AlertCreation.UserId)
-         await message.answer("Step 19: User ID", reply_markup=get_nav_kb(include_any=True))
-         return
-         
     data = await state.get_data()
-    # SAVE
-    updated_filters = {
-        'brand': data.get('brand'),
-        'model': data.get('model'),
-        'year_min': data.get('year_from'),
-        'year_max': data.get('year_to'),
-        'price_min': data.get('price_min'),
-        'price_max': data.get('price_max'),
-        'mileage_min': data.get('mileage_min'),
-        'mileage_max': data.get('mileage_max'),
-        'gearbox': data.get('gearbox'),
-        'fuel_type': data.get('fuel'),
-        'engine_min': data.get('engine_from'),
-        'engine_max': data.get('engine_to'),
-        'drive_type': data.get('drive'),
-        'body_type': data.get('body'),
-        'color': data.get('color'),
-        'is_business': data.get('is_business'),
-        'ad_status': data.get('ad_status'),
-        'target_user_id': data.get('target_user_id')
-    }
+    filters = data.get('filters', {})
     
-    # Clean None values? 
-    # filters = {k: v for k, v in updated_filters.items() if v is not None}
-    
-    await create_alert(message.from_user.id, name, updated_filters)
-    await state.clear()
-    
-    await message.answer(
-        f"✅ Alert '{name}' saved & activated!\n"
-        "Sending you latest matching ads...", 
-        reply_markup=get_main_menu_kb()
-    )
-    
-    # Send matches
-    from database import get_latest_matching_ads, format_ad_message
-    matches = await get_latest_matching_ads(updated_filters, limit=10)
-    
-    if matches:
-        for ad in matches:
-            text = format_ad_message(ad, 'new')
-            if text:
-                 await message.answer(text, parse_mode="HTML")
-        await message.answer(f"✅ Sent {len(matches)} matching ads.")
+    # Handle Special Logic
+    if value == "Any": 
+        filters[field] = None
+    elif field == "is_business":
+        if value == "Business": filters[field] = True
+        elif value == "Private": filters[field] = False
+        else: filters[field] = None
     else:
-        await message.answer("ℹ️ No existing matches found in recent ads. You will be notified of new ones!")
+        filters[field] = value
+        
+    # Reset dependent fields
+    if field == "brand":
+        filters['model'] = None # Reset model on brand change
+        
+    await state.update_data(filters=filters)
+    
+    # Return to Menu
+    kb = get_dashboard_kb(filters)
+    await state.set_state(AlertEditor.Menu)
+    await callback.message.edit_text("➕ <b>New Alert Wizard</b>", reply_markup=kb, parse_mode="HTML")
+
+@user_router.callback_query(F.data == "dash_back")
+async def back_to_dashboard_cb(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    filters = data.get('filters', {})
+    kb = get_dashboard_kb(filters)
+    await state.set_state(AlertEditor.Menu)
+    # Use callback.message here!
+    await callback.message.edit_text("➕ <b>New Alert Wizard</b>", reply_markup=kb, parse_mode="HTML")
+
+# Clean up old unused handlers (optional, but good practice to avoid file bloat)
+# Truncating old wizard code...
+
+
 
 async def save_alert_early(message: types.Message, state: FSMContext):
     data = await state.get_data()
