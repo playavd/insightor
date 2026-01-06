@@ -22,10 +22,11 @@ class AdData(TypedDict):
     car_brand: str | None
     car_model: str | None
     car_year: int | None
+    car_color: str | None
     gearbox: str | None
     body_type: str | None
     fuel_type: str | None
-    engine_size: str | None
+    engine_size: int | None
     drive_type: str | None
     mileage: int | None
     user_name: str | None
@@ -51,6 +52,7 @@ async def init_db() -> None:
                 car_brand TEXT,
                 car_model TEXT,
                 car_year INTEGER,
+                car_color TEXT,
                 gearbox TEXT,
                 body_type TEXT,
                 fuel_type TEXT,
@@ -64,6 +66,13 @@ async def init_db() -> None:
                 last_checked DATETIME
             )
         """)
+        # Migration: Add car_color column if it doesn't exist
+        try:
+            await db.execute("ALTER TABLE ads ADD COLUMN car_color TEXT")
+        except aiosqlite.OperationalError:
+            # Column likely already exists
+            pass
+            
         await db.commit()
     logger.info("Database initialized.")
 
@@ -73,16 +82,18 @@ async def add_ad(ad_data: AdData) -> None:
     params = ad_data.copy()
     # Add last_checked as first_seen for new ads
     params['last_checked'] = params['first_seen']
+    if 'car_color' not in params:
+        params['car_color'] = None
 
     query = """
         INSERT OR IGNORE INTO ads (
             ad_id, ad_url, first_seen, post_date, initial_price, current_price,
-            car_brand, car_model, car_year, gearbox, body_type, fuel_type,
+            car_brand, car_model, car_year, car_color, gearbox, body_type, fuel_type,
             engine_size, drive_type, mileage, user_name, user_id, is_business,
             ad_status, last_checked
         ) VALUES (
             :ad_id, :ad_url, :first_seen, :post_date, :initial_price, :current_price,
-            :car_brand, :car_model, :car_year, :gearbox, :body_type, :fuel_type,
+            :car_brand, :car_model, :car_year, :car_color, :gearbox, :body_type, :fuel_type,
             :engine_size, :drive_type, :mileage, :user_name, :user_id, :is_business,
             :ad_status, :last_checked
         )
@@ -109,6 +120,17 @@ async def update_ad_price(ad_id: str, new_price: int) -> None:
                 SET current_price = ?, last_checked = ? 
                 WHERE ad_id = ?
             """, (new_price, datetime.now(), ad_id))
+            await db.commit()
+
+async def update_ad_color(ad_id: str, color: str) -> None:
+    """Update the car color of an ad."""
+    async with db_lock:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            await db.execute("""
+                UPDATE ads 
+                SET car_color = ?
+                WHERE ad_id = ?
+            """, (color, ad_id))
             await db.commit()
 
 async def update_ad_post_date(ad_id: str, new_post_date: datetime) -> None:
