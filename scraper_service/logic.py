@@ -6,8 +6,15 @@ from bs4 import BeautifulSoup
 from datetime import datetime, date
 from typing import Callable, Any
 
-from config import BASE_URL, SEARCH_URL, REQUEST_DELAY_MIN, REQUEST_DELAY_MAX, MAX_CONSECUTIVE_UNCHANGED, MAX_PAGES_LIMIT, USER_AGENT_LIST
-from database import add_ad, get_ad, update_ad_price, update_ad_post_date, touch_ad, update_ad_status, update_ad_color, AdData
+from shared.config import (
+    BASE_URL, SEARCH_URL, REQUEST_DELAY_MIN, REQUEST_DELAY_MAX, 
+    MAX_CONSECUTIVE_UNCHANGED, MAX_PAGES_LIMIT, USER_AGENT_LIST
+)
+from shared.database import (
+    add_ad, get_ad, update_ad_price, update_ad_post_date, touch_ad, 
+    update_ad_status, update_ad_color
+)
+from shared.utils import AdData
 from dateparser import parse as parse_date
 
 logger = logging.getLogger(__name__)
@@ -150,6 +157,27 @@ class BazarakiScraper:
             if len(parts) >= 3 and 'Motors' in parts[0]:
                  if len(parts) > 2: details['car_brand'] = parts[2]
                  if len(parts) > 3: details['car_model'] = parts[3]
+        
+        # Fallback: Extract from Title or H1 if breadcrumbs fail or are incomplete
+        if not details.get('car_brand'):
+             # Title format often: "Toyota Yaris Cross 1.5L 2024 for sale in ..."
+             page_title = soup.title.get_text(strip=True) if soup.title else ""
+             h1_text = soup.find('h1', class_='page-title').get_text(strip=True) if soup.find('h1', class_='page-title') else ""
+             
+             # Combined check
+             check_text = h1_text or page_title
+             if check_text:
+                 # We can't easily guess the brand without a list of known brands, 
+                 # but we can try to grab the first word if it looks like a brand.
+                 # Better approach: Check if known brands are in the title.
+                 # However, we don't have the full DB of brands here easily without query.
+                 # Let's try to parse the first word of the H1 if it's not "Car" or "For Sale".
+                 words = check_text.split()
+                 if words and words[0].isalpha():
+                      details['car_brand'] = words[0] # Aggressive fallback, but better than Unknown
+                      if len(words) > 1:
+                          details['car_model'] = words[1]
+
 
         # Specs
         chars_list = soup.find('ul', class_='chars-column')
@@ -196,7 +224,7 @@ class BazarakiScraper:
              img = author_div.find('img')
              if img and img.get('alt'):
                  details['user_name'] = img.get('alt')
-                 details['is_business'] = True
+                 details['is_business'] = False # Default assumption, specific scraping might refine
              else:
                  details['user_name'] = author_div.get_text(strip=True)
                  details['is_business'] = False 
@@ -207,6 +235,29 @@ class BazarakiScraper:
                  link = author_div.find('a', href=True) or author_div.parent.find('a', href=True)
                  if link:
                      details['user_id'] = link['href'].strip('/').split('/')[-1]
+        
+        # IMPROVED Business Check
+        # 1. Check for "distinctions" badge (often used for Pro/Business sellers)
+        if soup.find(class_='author-distinctions__item') or soup.find(class_='verification-badge'):
+             details['is_business'] = True
+             logger.info(f"Detected Business via Badge for {url}")
+        
+        # 2. (REMOVED) Check for "Show all ads" link 
+        # Reason: Private sellers with multiple items also have this link.
+        # if soup.find('a', string=lambda t: t and "ads" in t.lower() and "seller" in t.lower()):
+        #      details['is_business'] = True
+        #      logger.info(f"Detected Business via 'Show all ads' link for {url}")
+
+        # 3. Check for dedicated "Shop" link
+        if soup.find('a', href=lambda h: h and '/shop/' in h):
+             details['is_business'] = True
+             logger.info(f"Detected Business via Shop Link for {url}")
+             
+        # 4. Reliable Check: "js-show-popup-contact-business"
+        # This class appears on the contact button for business accounts
+        if soup.find(class_='js-show-popup-contact-business'):
+             details['is_business'] = True
+             logger.info(f"Detected Business via Contact Popup Class for {url}")
         
         # Check Status in details
         if soup.find(class_='ribbon-vip') or soup.find(class_='label-vip'):
@@ -229,7 +280,7 @@ class BazarakiScraper:
         try:
             while not self.stop_signal:
                 url = f"{SEARCH_URL}?page={page}"
-                logger.info(f"Fetching {url}")
+                logger.debug(f"Fetching {url}")
                 
                 html = await self.fetch_page(url)
                 if not html:
@@ -247,7 +298,6 @@ class BazarakiScraper:
                         break
                         
                     ad_id = ad['ad_id']
-                    # logger.info(f"Processing Ad {i+1}/{len(ads)}: ID {ad_id} | Status {ad['status']}")
                     current_price = ad['price']
                     ad_status = ad['status']
                     
@@ -289,8 +339,12 @@ class BazarakiScraper:
                         current_post_date = ad.get('post_date')
                         
                         if current_post_date and db_post_date:
-                            if current_post_date > db_post_date:
-                                is_repost = True
+                            # Ensure we have datetime objects
+                            # (Already parsed in parse_listing_page and get_ad parsing)
+                            try:
+                                if current_post_date > db_post_date:
+                                    is_repost = True
+                            except TypeError: pass
                         
                         if is_repost:
                              await update_ad_post_date(ad_id, current_post_date)
@@ -438,4 +492,3 @@ class BazarakiScraper:
         finally:
             self.is_running = False
             logger.info(f"Rescan complete. Updated/Added {updated_count} ads.")
-
