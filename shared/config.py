@@ -21,7 +21,9 @@ USER_BOT_TOKEN = os.getenv("USER_BOT_TOKEN")
 MAX_ALERTS_BASIC = 5
 
 # Paths
-BASE_DIR = Path(__file__).resolve().parent
+# Base dir is the project root (parent of 'shared')
+BASE_DIR = Path(__file__).resolve().parent.parent
+# Database and logs stay in root or logs/
 DATABASE_PATH = BASE_DIR / "insightor.db"
 LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)

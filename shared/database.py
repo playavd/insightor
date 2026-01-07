@@ -1,38 +1,18 @@
 import aiosqlite
 import asyncio
 import logging
+import json
 from datetime import datetime, date
-from typing import TypedDict, Optional, Any
-from pathlib import Path
+from typing import TypedDict, Optional, Any, List
 
-from config import DATABASE_PATH
+# Local imports
+from .config import DATABASE_PATH
+from .utils import is_match, AdData
 
 logger = logging.getLogger(__name__)
 
-# Global lock for DB writes to prevent race conditions during concurrent heavy loads
+# Global lock for DB writes to prevent race conditions
 db_lock = asyncio.Lock()
-
-class AdData(TypedDict):
-    ad_id: str
-    ad_url: str
-    first_seen: datetime
-    post_date: datetime | None
-    initial_price: int
-    current_price: int
-    car_brand: str | None
-    car_model: str | None
-    car_year: int | None
-    car_color: str | None
-    gearbox: str | None
-    body_type: str | None
-    fuel_type: str | None
-    engine_size: int | None
-    drive_type: str | None
-    mileage: int | None
-    user_name: str | None
-    user_id: str | None
-    is_business: bool | None
-    ad_status: str
 
 class Stats(TypedDict):
     total_ads: int
@@ -41,6 +21,9 @@ class Stats(TypedDict):
 async def init_db() -> None:
     """Initialize the database and create tables if they don't exist."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL;")
+        await db.commit()
+        
         await db.execute("""
             CREATE TABLE IF NOT EXISTS ads (
                 ad_id TEXT PRIMARY KEY,
@@ -55,7 +38,6 @@ async def init_db() -> None:
                 car_color TEXT,
                 gearbox TEXT,
                 body_type TEXT,
-                fuel_type TEXT,
                 fuel_type TEXT,
                 engine_size INTEGER,
                 drive_type TEXT,
@@ -90,21 +72,21 @@ async def init_db() -> None:
                 FOREIGN KEY(user_id) REFERENCES users(user_id)
             )
         """)
-        # Migration: Add car_color column if it doesn't exist
+        # Migration: Add car_color if missing (idempotent check ideally, or try/except)
+        # Note: In production we might want a proper migration system.
         try:
             await db.execute("ALTER TABLE ads ADD COLUMN car_color TEXT")
         except aiosqlite.OperationalError:
-            # Column likely already exists
-            pass
+            pass # Column exists
             
         await db.commit()
     logger.info("Database initialized.")
 
+# --- ADS CRUD ---
+
 async def add_ad(ad_data: AdData) -> None:
     """Insert a new ad into the database."""
-    # Ensure datetimes are valid or None
     params = ad_data.copy()
-    # Add last_checked as first_seen for new ads
     params['last_checked'] = params['first_seen']
     if 'car_color' not in params:
         params['car_color'] = None
@@ -136,7 +118,6 @@ async def get_ad(ad_id: str) -> dict[str, Any] | None:
             return dict(row) if row else None
 
 async def update_ad_price(ad_id: str, new_price: int) -> None:
-    """Update the current price of an ad."""
     async with db_lock:
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await db.execute("""
@@ -147,18 +128,12 @@ async def update_ad_price(ad_id: str, new_price: int) -> None:
             await db.commit()
 
 async def update_ad_color(ad_id: str, color: str) -> None:
-    """Update the car color of an ad."""
     async with db_lock:
         async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute("""
-                UPDATE ads 
-                SET car_color = ?
-                WHERE ad_id = ?
-            """, (color, ad_id))
+            await db.execute("UPDATE ads SET car_color = ? WHERE ad_id = ?", (color, ad_id))
             await db.commit()
 
 async def update_ad_post_date(ad_id: str, new_post_date: datetime) -> None:
-    """Update the post date of an ad (repost)."""
     async with db_lock:
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await db.execute("""
@@ -169,7 +144,6 @@ async def update_ad_post_date(ad_id: str, new_post_date: datetime) -> None:
             await db.commit()
 
 async def update_ad_status(ad_id: str, new_status: str) -> None:
-    """Update the status of an ad (e.g., Basic -> VIP)."""
     async with db_lock:
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await db.execute("""
@@ -180,14 +154,13 @@ async def update_ad_status(ad_id: str, new_status: str) -> None:
             await db.commit()
 
 async def touch_ad(ad_id: str) -> None:
-    """Update last_checked timestamp for an ad."""
     async with db_lock:
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await db.execute("UPDATE ads SET last_checked = ? WHERE ad_id = ?", (datetime.now(), ad_id))
             await db.commit()
 
 async def get_all_ads() -> list[dict[str, Any]]:
-    """Retrieve all ads for export."""
+    """Retrieve all ads usage for export."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM ads") as cursor:
@@ -195,141 +168,30 @@ async def get_all_ads() -> list[dict[str, Any]]:
             return [dict(row) for row in rows]
 
 async def get_statistics() -> Stats:
-    """Get total ads count and new ads in the last 24 hours."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         async with db.execute("SELECT COUNT(*) FROM ads") as cursor:
-            row = await cursor.fetchone()
-            total = row[0] if row else 0
+            row_total = await cursor.fetchone()
+            total = row_total[0] if row_total else 0
         
         async with db.execute("SELECT COUNT(*) FROM ads WHERE first_seen > date('now', '-1 day')") as cursor:
-            row = await cursor.fetchone()
-            new_today = row[0] if row else 0
+            row_new = await cursor.fetchone()
+            new_today = row_new[0] if row_new else 0
             
     return {"total_ads": total, "new_today": new_today}
 
-# --- Shared Logic ---
+# --- SEARCH & MATCHING ---
 
-def is_match(ad: AdData, filters: dict) -> bool:
-    """Check if ad matches alert filters."""
-    try:
-        # Brand (Case Insensitive)
-        if filters.get('brand'):
-            f_brand = filters['brand'].lower()
-            a_brand = (ad.get('car_brand') or '').lower()
-            if f_brand != a_brand: return False
-        
-        # Model (Case Insensitive, supports list)
-        if filters.get('model'):
-             ad_model = (ad.get('car_model') or '').lower()
-             target_models = filters['model']
-             
-             if isinstance(target_models, list):
-                 # Check against lowercased list
-                 targets_lower = [str(x).lower() for x in target_models]
-                 if ad_model not in targets_lower: return False
-             else:
-                 if ad_model != str(target_models).lower(): return False
-
-        # Years
-        if filters.get('year_min') and (not ad.get('car_year') or ad['car_year'] < filters['year_min']): return False
-        if filters.get('year_max') and (not ad.get('car_year') or ad['car_year'] > filters['year_max']): return False
-        
-        # Prices
-        if filters.get('price_min') and (not ad.get('current_price') or ad['current_price'] < filters['price_min']): return False
-        if filters.get('price_max') and (not ad.get('current_price') or ad['current_price'] > filters['price_max']): return False
-
-        # Mileage
-        if filters.get('mileage_min') and (not ad.get('mileage') or ad['mileage'] < filters['mileage_min']): return False
-        if filters.get('mileage_max') and (not ad.get('mileage') or ad['mileage'] > filters['mileage_max']): return False
-
-        # Engine
-        if filters.get('engine_min'):
-             if not ad.get('engine_size'): return False
-             if ad['engine_size'] < filters['engine_min']: return False
-        if filters.get('engine_max'):
-             if not ad.get('engine_size'): return False
-             if ad['engine_size'] > filters['engine_max']: return False
-
-        # Others (Exact match, Case Insensitive for safety)
-        for field in ['gearbox', 'fuel_type', 'drive_type', 'body_type', 'car_color', 'ad_status']:
-            filter_key = field if field != 'car_color' else 'color'
-            f_val = filters.get(filter_key)
-            if f_val:
-                a_val = ad.get(field)
-                if not a_val: return False # If filter exists but ad property missing, mismatch
-                
-                # Special logic for ad_status = VIP+TOP
-                if field == 'ad_status' and str(f_val).upper() == "VIP+TOP":
-                    if str(a_val).upper() not in ["VIP", "TOP"]: return False
-                else:
-                    if str(f_val).lower() != str(a_val).lower(): return False
-
-        # Business
-        if filters.get('is_business') is not None and filters['is_business'] != ad.get('is_business'): return False
-        
-        # User ID
-        if filters.get('target_user_id'):
-            target = str(filters['target_user_id']).strip().lower()
-            ad_user = str(ad.get('user_id', '')).strip().lower()
-            if target != ad_user: return False
-
-        return True
-    except Exception as e:
-        logger.error(f"Error matching ad: {e}")
-        return False
-
-def format_ad_message(ad_data: AdData, notification_type: str = 'new') -> str | None:
-    """Format ad data into a message string."""
-    try:
-        brand = ad_data.get('car_brand', 'Unknown') or 'Unknown'
-        model = ad_data.get('car_model', '') or ''
-        year = ad_data.get('car_year', '') or ''
-        title = f"{brand} {model} {year}".strip()
-        
-        mileage = ad_data.get('mileage', 0)
-        mileage_str = f"{mileage:,} km" if mileage else "N/A"
-            
-        fuel = ad_data.get('fuel_type', 'N/A')
-        gear = ad_data.get('gearbox', 'N/A')
-        engine = ad_data.get('engine_size', 'N/A')
-        if isinstance(engine, int): engine = f"{engine} cc"
-
-        seller = ad_data.get('user_name', 'Unknown')
-        status = ad_data.get('ad_status', 'Basic')
-        
-        status_prefix = "🚗"
-        if status == 'VIP': status_prefix = "🌟 VIP"
-        elif status == 'TOP': status_prefix = "🔥 TOP"
-        
-        seller_id = ad_data.get('user_id', '')
-        seller_info = seller
-        if seller_id:
-            seller_info += f" (#id{seller_id})"
-
-        msg_text = ""
-        if notification_type == 'new':
-            msg_text = (
-                f"{status_prefix} <a href=\"{ad_data['ad_url']}\">{title}</a>\n"
-                f"💰 <b>{ad_data['current_price']} €</b>  ⏱️ {mileage_str}\n"
-                f"⛽ {fuel}  ⚙️ {gear}  🧩 {engine}\n"
-                f"👤 {seller_info}"
-            )
-        elif notification_type == 'repost':
-            msg_text = (
-                f"🔄 <b>Ad Reposted!</b>\n"
-                f"The ad was bumped to the top.\n"
-                f"🔗 <a href=\"{ad_data['ad_url']}\">{brand} {model}</a>"
-            )
-        return msg_text
-    except Exception as e:
-        logger.error(f"Error formatting match msg: {e}")
-        return None
-
-async def get_latest_matching_ads(filters: dict, limit: int = 10) -> list[AdData]:
+async def get_latest_matching_ads(filters: dict, limit: int = 10) -> list[dict[str, Any]]:
+    """
+    Fetch recent ads and filter them in memory using helper logic.
+    Optimized to fetch only last checked ads.
+    """
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
-        # Fetch a reasonable batch of recent ads to check
-        cursor = await db.execute("SELECT * FROM ads ORDER BY last_checked DESC LIMIT 2000") # Changed to last_checked for recency
+        # Fetching strictly by recency (last_checked) might miss older ads that just matched?
+        # But use case is "New Alert" or "Activate", usually we want recent market status.
+        # LIMIT 2000 is a heuristic to avoid scanning 100k ads.
+        cursor = await db.execute("SELECT * FROM ads ORDER BY last_checked DESC LIMIT 2000")
         rows = await cursor.fetchall()
         
         matches = []
@@ -344,9 +206,8 @@ async def get_latest_matching_ads(filters: dict, limit: int = 10) -> list[AdData
 async def get_min_max_values(column: str) -> tuple[int, int]:
     """Get min and max values for a numeric column."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        # Cast to integer for engine_size if it's stored as text, though we updated schema.
-        # But for safety with existing data, we cast.
         col_expr = f"CAST({column} AS INTEGER)" if column == "engine_size" else column
+        # Ensure we don't pick up garbage
         query = f"SELECT MIN({col_expr}), MAX({col_expr}) FROM ads WHERE {col_expr} IS NOT NULL AND {col_expr} > 0"
         async with db.execute(query) as cursor:
             row = await cursor.fetchone()
@@ -366,8 +227,9 @@ async def get_distinct_values(column: str, filter_col: str | None = None, filter
             rows = await cursor.fetchall()
             return [row[0] for row in rows]
 
-async def add_or_update_user(user_id: int, username: str, first_name: str) -> None:
-    """Add or update a Telegram user."""
+# --- USER & ALERTS ---
+
+async def add_or_update_user(user_id: int, username: str | None, first_name: str | None) -> None:
     async with db_lock:
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await db.execute("""
@@ -380,7 +242,6 @@ async def add_or_update_user(user_id: int, username: str, first_name: str) -> No
             await db.commit()
 
 async def get_user(user_id: int) -> dict[str, Any] | None:
-    """Get user details."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
@@ -388,8 +249,6 @@ async def get_user(user_id: int) -> dict[str, Any] | None:
             return dict(row) if row else None
 
 async def create_alert(user_id: int, name: str, filters: dict) -> bool:
-    """Create a new alert for user."""
-    import json
     async with db_lock:
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await db.execute("INSERT INTO alerts (user_id, name, created_at, filters) VALUES (?, ?, ?, ?)",
@@ -399,7 +258,6 @@ async def create_alert(user_id: int, name: str, filters: dict) -> bool:
     return True
 
 async def get_user_alerts(user_id: int) -> list[dict[str, Any]]:
-    """Get all alerts for a user."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM alerts WHERE user_id = ?", (user_id,)) as cursor:
@@ -407,7 +265,6 @@ async def get_user_alerts(user_id: int) -> list[dict[str, Any]]:
             return [dict(row) for row in rows]
 
 async def get_alert(alert_id: int) -> dict[str, Any] | None:
-    """Retrieve a single alert by ID."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM alerts WHERE alert_id = ?", (alert_id,)) as cursor:
@@ -415,30 +272,34 @@ async def get_alert(alert_id: int) -> dict[str, Any] | None:
             return dict(row) if row else None
 
 async def delete_alert(alert_id: int, user_id: int) -> None:
-    """Delete an alert."""
     async with db_lock:
         async with aiosqlite.connect(DATABASE_PATH) as db:
+            # First check if it was active to decrement correctly?
+            # Or just decrement if row existed?
+            # Safer to decrement only if we actually delete.
+            # SQLite supports RETURNING in recent versions, but standard way:
             await db.execute("DELETE FROM alerts WHERE alert_id = ? AND user_id = ?", (alert_id, user_id))
-            await db.execute("UPDATE users SET active_alerts_count = MAX(0, active_alerts_count - 1) WHERE user_id = ?", (user_id,))
+            # Recalculate count to be safe
+            await db.execute("""
+                UPDATE users 
+                SET active_alerts_count = (SELECT COUNT(*) FROM alerts WHERE user_id = ? AND is_active = 1)
+                WHERE user_id = ?
+            """, (user_id, user_id))
             await db.commit()
 
 async def toggle_alert(alert_id: int, user_id: int, is_active: bool) -> None:
-    """Activate or deactivate an alert."""
     async with db_lock:
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await db.execute("UPDATE alerts SET is_active = ? WHERE alert_id = ? AND user_id = ?", (is_active, alert_id, user_id))
+            # Update count
+            await db.execute("""
+                UPDATE users 
+                SET active_alerts_count = (SELECT COUNT(*) FROM alerts WHERE user_id = ? AND is_active = 1)
+                WHERE user_id = ?
+            """, (user_id, user_id))
             await db.commit()
 
-async def get_active_alerts_count_by_user(user_id: int) -> int:
-    """Get precise count of active alerts for a user."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        async with db.execute("SELECT COUNT(*) FROM alerts WHERE user_id = ? AND is_active = 1", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else 0
-
 async def update_alert(alert_id: int, user_id: int, filters: dict) -> None:
-    """Update filters for an existing alert."""
-    import json
     async with db_lock:
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await db.execute("UPDATE alerts SET filters = ? WHERE alert_id = ? AND user_id = ?", 
@@ -446,7 +307,6 @@ async def update_alert(alert_id: int, user_id: int, filters: dict) -> None:
             await db.commit()
 
 async def rename_alert(alert_id: int, user_id: int, new_name: str) -> None:
-    """Rename an alert."""
     async with db_lock:
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await db.execute("UPDATE alerts SET name = ? WHERE alert_id = ? AND user_id = ?", 
@@ -454,9 +314,16 @@ async def rename_alert(alert_id: int, user_id: int, new_name: str) -> None:
             await db.commit()
 
 async def get_active_alerts() -> list[dict[str, Any]]:
-    """Get all active alerts for matching."""
+    """Get all active alerts for the scraper loop."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM alerts WHERE is_active = 1") as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+async def get_active_alerts_count_by_user(user_id: int) -> int:
+    """Get precise count of active alerts for a user."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM alerts WHERE user_id = ? AND is_active = 1", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else 0

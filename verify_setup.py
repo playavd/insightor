@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from database import init_db, add_ad, get_ad
+from shared.database import init_db, add_ad, get_ad
 from datetime import datetime
 
 # Configure logging
