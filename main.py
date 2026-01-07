@@ -72,25 +72,41 @@ async def notify_user(notification_type: str, ad_data: dict):
             alerts = await get_active_alerts()
             logger.debug(f"Notify User: Loaded {len(alerts)} active alerts.")
             
+            notified_users = set()
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
             for alert in alerts:
+                user_id = alert['user_id']
+                if user_id in notified_users:
+                    continue
+
                 filters = dict()
                 import json
                 try: filters = json.loads(alert['filters'])
                 except: continue
                 
                 if is_match(ad_data, filters):
-                    logger.info(f"MATCH FOUND: Ad {ad_data.get('ad_id')} for User {alert['user_id']}")
+                    logger.info(f"MATCH FOUND: Ad {ad_data.get('ad_id')} for User {user_id}")
                     try:
+                        # Append Alert Name
+                        final_msg = f"🔔 <b>{alert['name']}</b>\n\n{msg_text}"
+                        
+                        # Add Deactivate Button
+                        kb = InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="🔕 Deactivate Alert", callback_data=f"toggle_alert:{alert['alert_id']}:off")]
+                        ])
+
                         # Add timeout to prevent hanging the scraper cycle
                         await asyncio.wait_for(
-                            user_bot.send_message(alert['user_id'], msg_text, parse_mode="HTML"),
+                            user_bot.send_message(user_id, final_msg, parse_mode="HTML", reply_markup=kb),
                             timeout=10
                         )
-                        logger.debug(f"Notification sent to {alert['user_id']}")
+                        logger.debug(f"Notification sent to {user_id}")
+                        notified_users.add(user_id)
                     except asyncio.TimeoutError:
-                        logger.error(f"Timeout notifying user {alert['user_id']}")
+                        logger.error(f"Timeout notifying user {user_id}")
                     except Exception as u_e:
-                        logger.warning(f"Failed to notify user {alert['user_id']}: {u_e}")
+                        logger.warning(f"Failed to notify user {user_id}: {u_e}")
 
     except Exception as e:
         logger.error(f"Failed to send notification: {e}")
