@@ -2,8 +2,8 @@ import aiosqlite
 import asyncio
 import logging
 import json
-from datetime import datetime, date
-from typing import TypedDict, Optional, Any, List
+from datetime import datetime
+from typing import TypedDict, Any, List, Optional
 
 # Local imports
 from .config import DATABASE_PATH
@@ -72,12 +72,12 @@ async def init_db() -> None:
                 FOREIGN KEY(user_id) REFERENCES users(user_id)
             )
         """)
-        # Migration: Add car_color if missing (idempotent check ideally, or try/except)
-        # Note: In production we might want a proper migration system.
+        
+        # Migrations
         try:
             await db.execute("ALTER TABLE ads ADD COLUMN car_color TEXT")
         except aiosqlite.OperationalError:
-            pass # Column exists
+            pass # Column already exists
             
         await db.commit()
     logger.info("Database initialized.")
@@ -86,10 +86,10 @@ async def init_db() -> None:
 
 async def add_ad(ad_data: AdData) -> None:
     """Insert a new ad into the database."""
-    params = ad_data.copy()
-    params['last_checked'] = params['first_seen']
+    params = ad_data.copy() # type: ignore
+    params['last_checked'] = params['first_seen'] # type: ignore
     if 'car_color' not in params:
-        params['car_color'] = None
+        params['car_color'] = None # type: ignore
 
     query = """
         INSERT OR IGNORE INTO ads (
@@ -109,7 +109,7 @@ async def add_ad(ad_data: AdData) -> None:
             await db.execute(query, params)
             await db.commit()
 
-async def get_ad(ad_id: str) -> dict[str, Any] | None:
+async def get_ad(ad_id: str) -> Optional[dict[str, Any]]:
     """Retrieve an ad by its ID."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -159,7 +159,7 @@ async def touch_ad(ad_id: str) -> None:
             await db.execute("UPDATE ads SET last_checked = ? WHERE ad_id = ?", (datetime.now(), ad_id))
             await db.commit()
 
-async def get_all_ads() -> list[dict[str, Any]]:
+async def get_all_ads() -> List[dict[str, Any]]:
     """Retrieve all ads usage for export."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -181,7 +181,7 @@ async def get_statistics() -> Stats:
 
 # --- SEARCH & MATCHING ---
 
-async def get_latest_matching_ads(filters: dict, limit: int = 10) -> list[dict[str, Any]]:
+async def get_latest_matching_ads(filters: dict, limit: int = 10) -> List[dict[str, Any]]:
     """
     Fetch recent ads and filter them in memory using helper logic.
     Optimized to fetch only last checked ads.
@@ -190,7 +190,6 @@ async def get_latest_matching_ads(filters: dict, limit: int = 10) -> list[dict[s
         db.row_factory = aiosqlite.Row
         # Fetching strictly by recency (last_checked) might miss older ads that just matched?
         # But use case is "New Alert" or "Activate", usually we want recent market status.
-        # LIMIT 2000 is a heuristic to avoid scanning 100k ads.
         cursor = await db.execute("SELECT * FROM ads ORDER BY last_checked DESC LIMIT 2000")
         rows = await cursor.fetchall()
         
@@ -213,7 +212,7 @@ async def get_min_max_values(column: str) -> tuple[int, int]:
             row = await cursor.fetchone()
             return (row[0] or 0, row[1] or 0) if row else (0, 0)
 
-async def get_distinct_values(column: str, filter_col: str | None = None, filter_val: str | None = None) -> list[str]:
+async def get_distinct_values(column: str, filter_col: Optional[str] = None, filter_val: Optional[str] = None) -> List[str]:
     """Get sorted distinct values for a text column."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         query = f"SELECT DISTINCT {column} FROM ads WHERE {column} IS NOT NULL AND {column} != ''"
@@ -229,7 +228,7 @@ async def get_distinct_values(column: str, filter_col: str | None = None, filter
 
 # --- USER & ALERTS ---
 
-async def add_or_update_user(user_id: int, username: str | None, first_name: str | None) -> None:
+async def add_or_update_user(user_id: int, username: Optional[str], first_name: Optional[str]) -> None:
     async with db_lock:
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await db.execute("""
@@ -241,7 +240,7 @@ async def add_or_update_user(user_id: int, username: str | None, first_name: str
             """, (user_id, username, first_name, datetime.now()))
             await db.commit()
 
-async def get_user(user_id: int) -> dict[str, Any] | None:
+async def get_user(user_id: int) -> Optional[dict[str, Any]]:
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
@@ -257,14 +256,14 @@ async def create_alert(user_id: int, name: str, filters: dict) -> bool:
             await db.commit()
     return True
 
-async def get_user_alerts(user_id: int) -> list[dict[str, Any]]:
+async def get_user_alerts(user_id: int) -> List[dict[str, Any]]:
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM alerts WHERE user_id = ?", (user_id,)) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-async def get_alert(alert_id: int) -> dict[str, Any] | None:
+async def get_alert(alert_id: int) -> Optional[dict[str, Any]]:
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM alerts WHERE alert_id = ?", (alert_id,)) as cursor:
@@ -274,10 +273,6 @@ async def get_alert(alert_id: int) -> dict[str, Any] | None:
 async def delete_alert(alert_id: int, user_id: int) -> None:
     async with db_lock:
         async with aiosqlite.connect(DATABASE_PATH) as db:
-            # First check if it was active to decrement correctly?
-            # Or just decrement if row existed?
-            # Safer to decrement only if we actually delete.
-            # SQLite supports RETURNING in recent versions, but standard way:
             await db.execute("DELETE FROM alerts WHERE alert_id = ? AND user_id = ?", (alert_id, user_id))
             # Recalculate count to be safe
             await db.execute("""
@@ -313,7 +308,7 @@ async def rename_alert(alert_id: int, user_id: int, new_name: str) -> None:
                              (new_name, alert_id, user_id))
             await db.commit()
 
-async def get_active_alerts() -> list[dict[str, Any]]:
+async def get_active_alerts() -> List[dict[str, Any]]:
     """Get all active alerts for the scraper loop."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
