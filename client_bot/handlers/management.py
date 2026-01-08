@@ -41,11 +41,13 @@ async def show_alert_list(message: types.Message, state: FSMContext):
         return
 
     builder = ReplyKeyboardBuilder()
+    
+    # New Alert at Top
+    builder.button(text="🔔 New Alert")
+    
     for alert in alerts:
         status_icon = "🟢" if alert['is_active'] else "🔴"
         builder.button(text=f"{status_icon} {alert['name']}")
-    
-    builder.button(text="🔔 New Alert")
     builder.button(text="⬅️ Back")
     builder.adjust(1)
     
