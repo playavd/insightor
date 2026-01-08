@@ -42,17 +42,18 @@ async def show_favorites_page(message_or_callback: types.Message | CallbackQuery
         keyboard.append([InlineKeyboardButton(text=title, callback_data=f"fav_detail:{ad['ad_id']}:{page}")])
     
     # Navigation
-    nav_row = []
-    if page > 0:
-        nav_row.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=f"fav_page:{page-1}"))
-    
-    # "Page X of Y" - purely visual or just count?
-    nav_row.append(InlineKeyboardButton(text=f"{page+1}/{total_pages}", callback_data="noop"))
-    
-    if page < total_pages - 1:
-        nav_row.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"fav_page:{page+1}"))
-    
-    keyboard.append(nav_row)
+    if total_pages > 1:
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=f"fav_page:{page-1}"))
+        
+        # "Page X of Y" - purely visual or just count?
+        nav_row.append(InlineKeyboardButton(text=f"{page+1}/{total_pages}", callback_data="noop"))
+        
+        if page < total_pages - 1:
+            nav_row.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"fav_page:{page+1}"))
+        
+        keyboard.append(nav_row)
     keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data="fav_close")])
     
     markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
