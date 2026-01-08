@@ -207,7 +207,7 @@ def format_ad_message(ad_data: AdData | dict[str, Any], notification_type: str =
                 seller_str += " (Private)"
 
             msg_text = (
-                f"ℹ️ <b>Details for Ad #{ad_data['ad_id']}</b>\n"
+                f"ℹ️ <b>Details for Ad #ad{ad_data['ad_id']}</b>\n"
                 f"👀 First seen: {first_seen_str}\n"
                 f"🚗 <a href=\"{ad_data['ad_url']}\">{safe_title}</a>{status_display}\n"
                 f"💰 Initial price was {init_price} €  ⏱️ {mileage_str}\n"
@@ -247,8 +247,8 @@ def format_ad_message(ad_data: AdData | dict[str, Any], notification_type: str =
                      elif ctype == 'repost':
                          line = "Ad was reposted"
                      elif ctype == 'active':
-                         if str(new).lower() == 'false': line = "Ad was deactivated"
-                         else: line = "Ad was activated"
+                         if str(new).lower() == 'false': line = "⛔ Deactivated"
+                         else: line = "✅ Activated"
                      else:
                          line = f"{ctype} changed"
                      
