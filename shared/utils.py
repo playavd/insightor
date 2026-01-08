@@ -1,5 +1,6 @@
 import logging
 import json
+from datetime import datetime, date
 from typing import TypedDict, Any
 
 logger = logging.getLogger(__name__)
@@ -104,7 +105,7 @@ def is_match(ad: AdData | dict[str, Any], filters: dict) -> bool:
         logger.error(f"Error matching ad: {e}")
         return False
 
-def format_ad_message(ad_data: AdData | dict[str, Any], notification_type: str = 'new') -> str | None:
+def format_ad_message(ad_data: AdData | dict[str, Any], notification_type: str = 'new', history: list[dict[str, Any]] = None) -> str | None:
     """Format ad data into a message string."""
     try:
         brand = ad_data.get('car_brand', 'Unknown') or 'Unknown'
@@ -165,6 +166,94 @@ def format_ad_message(ad_data: AdData | dict[str, Any], notification_type: str =
                 f"The ad was bumped to the top.\n"
                 f"🔗 <a href=\"{ad_data['ad_url']}\">{safe_brand} {safe_model}</a>"
             )
+
+        elif notification_type == 'detailed':
+            import html
+            safe_title = html.escape(title)
+            safe_fuel = html.escape(fuel)
+            safe_gear = html.escape(gear)
+            safe_seller = html.escape(seller)
+            
+            # Status visualization
+            status_display = ""
+            if status == 'VIP': status_display = " 🌟 VIP"
+            elif status == 'TOP': status_display = " 🔥 TOP"
+            elif status == 'VIP+TOP': status_display = " 🌟 VIP 🔥 TOP"
+
+            # Init Price
+            init_price = ad_data.get('initial_price', ad_data.get('current_price'))
+            
+            # First Seen
+            first_seen = ad_data.get('first_seen', 'N/A')
+            if isinstance(first_seen, datetime):
+                first_seen_str = first_seen.strftime("%Y-%m-%d %H:%M")
+            elif isinstance(first_seen, str):
+                try: 
+                    dt = datetime.fromisoformat(first_seen)
+                    first_seen_str = dt.strftime("%Y-%m-%d %H:%M")
+                except:
+                    first_seen_str = str(first_seen)
+            else:
+                first_seen_str = str(first_seen)
+
+            # Seller info
+            seller_str = f"👤 {safe_seller}"
+            if seller_id:
+                seller_str += f" #{seller_id}"
+            
+            if ad_data.get('is_business'):
+                seller_str += " (Business)"
+            else:
+                seller_str += " (Private)"
+
+            msg_text = (
+                f"ℹ️ <b>Details for Ad #{ad_data['ad_id']}</b>\n"
+                f"👀 First seen: {first_seen_str}\n"
+                f"🚗 <a href=\"{ad_data['ad_url']}\">{safe_title}</a>{status_display}\n"
+                f"💰 Initial price was {init_price} €  ⏱️ {mileage_str}\n"
+                f"⛽ {safe_fuel}  ⚙️ {safe_gear}  🧩 {engine}\n"
+                f"{seller_str}\n"
+            )
+            
+            if not history:
+                 msg_text += "No tracked changes yet."
+            else:
+                 msg_text += "\n<b>History:</b>\n"
+                 # Format History: DD MMM HH:MM Event
+                 for entry in history[:50]:
+                     ts = entry['timestamp']
+                     if isinstance(ts, str):
+                         try:
+                             if '.' in ts: ts = datetime.strptime(ts, '%Y-%m-%d %H:%M:%S.%f')
+                             else: ts = datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
+                         except:
+                             pass
+                     if not isinstance(ts, datetime):
+                         ts_str = "?? ???"
+                     else:
+                         ts_str = ts.strftime("%d %b %H:%M")
+ 
+                     ctype = entry['change_type']
+                     old = entry['old_value']
+                     new = entry['new_value']
+                     
+                     line = ""
+                     if ctype == 'first_seen':
+                         line = "First seen"
+                     elif ctype == 'price_change' or ctype == 'price':
+                         line = f"Price {old} > {new}"
+                     elif ctype == 'status_change' or ctype == 'status':
+                         line = f"{old} > {new}"
+                     elif ctype == 'repost':
+                         line = "Ad was reposted"
+                     elif ctype == 'active':
+                         if str(new).lower() == 'false': line = "Ad was deactivated"
+                         else: line = "Ad was activated"
+                     else:
+                         line = f"{ctype} changed"
+                     
+                     msg_text += f"{ts_str} {line}\n"
+
         return msg_text
     except Exception as e:
         logger.error(f"Error formatting match msg: {e}")

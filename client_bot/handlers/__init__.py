@@ -4,7 +4,6 @@ from .common import router as common_router
 from .wizard import router as wizard_router
 from .dashboard import router as dashboard_router
 from .management import router as management_router
-
 user_router = Router()
 
 user_router.include_router(common_router)
