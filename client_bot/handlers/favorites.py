@@ -1,13 +1,20 @@
 import logging
+import re
+from datetime import datetime
+from bs4 import BeautifulSoup
 from aiogram import Router, types, F
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-from shared.database import get_user_followed_ads_paginated, get_user_followed_ads_count, get_ad, get_ad_history
+from shared.database import (
+    get_user_followed_ads_paginated, get_user_followed_ads_count, 
+    get_ad, get_ad_history, is_ad_followed_by_user, add_ad, follow_ad
+)
 from shared.utils import format_ad_message
 from client_bot.keyboards import get_main_menu_kb
-from client_bot.states import FavoriteAddition as from_client_bot_states_FavoriteAddition
+from client_bot.states import FavoriteAddition
+from scraper_service.logic import BazarakiScraper
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -128,7 +135,6 @@ async def on_fav_detail(callback: CallbackQuery):
 
 @router.callback_query(F.data == "fav_add_url")
 async def on_fav_add_url(callback: CallbackQuery, state: FSMContext):
-    from client_bot.states import FavoriteAddition
     await state.set_state(FavoriteAddition.WaitingForURL)
     
     await callback.message.answer(
@@ -140,13 +146,13 @@ async def on_fav_add_url(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-@router.message(F.text, StateFilter(from_client_bot_states_FavoriteAddition.WaitingForURL))
+@router.message(F.text, StateFilter(FavoriteAddition.WaitingForURL))
 async def process_fav_url_input(message: types.Message, state: FSMContext):
     url = message.text.strip()
     
     if url in ["/cancel", "❌ Cancel"]:
         await state.clear()
-        await show_favorites_page(message.from_user.id, message.from_user.id, 0)
+        await show_favorites_page(message, message.from_user.id, 0)
         return
         
     # Validation
@@ -156,7 +162,6 @@ async def process_fav_url_input(message: types.Message, state: FSMContext):
     
     try:
         # Extract ID roughly to check existence first
-        import re
         # Match /adv/123456_ or /adv/123456/
         # Allow trailing stuff
         match = re.search(r"/adv/(\d+)", url)
@@ -166,8 +171,6 @@ async def process_fav_url_input(message: types.Message, state: FSMContext):
         
         ad_id = match.group(1)
         user_id = message.from_user.id
-        
-        from shared.database import is_ad_followed_by_user, add_ad, follow_ad
         
         # Check if already followed
         if await is_ad_followed_by_user(user_id, ad_id):
@@ -186,7 +189,6 @@ async def process_fav_url_input(message: types.Message, state: FSMContext):
         # Not followed -> Scrape
         status_msg = await message.answer("🔎 Checking link...")
         
-        from scraper_service.logic import BazarakiScraper
         scraper = BazarakiScraper()
         
         details = await scraper.fetch_ad_details(url)
@@ -216,7 +218,6 @@ async def process_fav_url_input(message: types.Message, state: FSMContext):
              
         # Add to DB
         # Construct full AdData
-        from datetime import datetime
         # We need price too, fetched from details page? 
         # logic.py fetch_ad_details DOES NOT fetch price usually (scraper gets it from listing).
         # We need to ensure we get price. Scraper logic updated in check_followed_ads to parse price from details.
@@ -247,7 +248,6 @@ async def process_fav_url_input(message: types.Message, state: FSMContext):
         # Yes, I can use scraper.fetch_page() and parse.
         
         html = await scraper.fetch_page(url)
-        from bs4 import BeautifulSoup
         soup = BeautifulSoup(html, 'lxml')
         
         # Price Parse
@@ -295,7 +295,7 @@ async def process_fav_url_input(message: types.Message, state: FSMContext):
         await state.clear()
         
         # Show updated Favorites list
-        await show_favorites_page(message.from_user.id, message.from_user.id, 0)
+        await show_favorites_page(message, message.from_user.id, 0)
         
     except Exception as e:
         logger.error(f"Error adding fav url: {e}")
