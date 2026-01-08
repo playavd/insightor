@@ -11,8 +11,8 @@ def get_main_menu_kb(alerts_count: int = 0, favorites_count: int = 0):
         buttons.append(KeyboardButton(text="🗂️ My Alerts"))
     
     # 2. Favorites
-    if favorites_count > 0:
-        buttons.append(KeyboardButton(text="⭐ Favorites"))
+    # Always show Favorites as requested
+    buttons.append(KeyboardButton(text="⭐ Favorites"))
     
     # 3. Archive
     buttons.append(KeyboardButton(text="🔍 Archive"))
