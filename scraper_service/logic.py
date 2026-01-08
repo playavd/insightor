@@ -12,7 +12,8 @@ from shared.constants import (
 )
 from shared.database import (
     add_ad, get_ad, update_ad_price, update_ad_post_date, touch_ad, 
-    update_ad_status, update_ad_color
+    update_ad_status, update_ad_color, get_followed_ads, 
+    add_history_entry, update_follow_check_status, get_ad_failed_checks
 )
 from shared.utils import AdData
 from dateparser import parse as parse_date
@@ -105,7 +106,7 @@ class BazarakiScraper:
                         if found_prices:
                             price = min(found_prices)
                      except ValueError:
-                        pass
+                        logger.warning(f"Failed to parse price from: {text}")
 
                 # Status
                 is_vip = item.has_attr('data-t-vip') or item.find(attrs={"data-t-vip": True}) or item.find(class_='ribbon-vip')
@@ -167,10 +168,6 @@ class BazarakiScraper:
              # Combined check
              check_text = h1_text or page_title
              if check_text:
-                 # We can't easily guess the brand without a list of known brands, 
-                 # but we can try to grab the first word if it looks like a brand.
-                 # Better approach: Check if known brands are in the title.
-                 # However, we don't have the full DB of brands here easily without query.
                  # Let's try to parse the first word of the H1 if it's not "Car" or "For Sale".
                  words = check_text.split()
                  if words and words[0].isalpha():
@@ -242,12 +239,6 @@ class BazarakiScraper:
              details['is_business'] = True
              logger.info(f"Detected Business via Badge for {url}")
         
-        # 2. (REMOVED) Check for "Show all ads" link 
-        # Reason: Private sellers with multiple items also have this link.
-        # if soup.find('a', string=lambda t: t and "ads" in t.lower() and "seller" in t.lower()):
-        #      details['is_business'] = True
-        #      logger.info(f"Detected Business via 'Show all ads' link for {url}")
-
         # 3. Check for dedicated "Shop" link
         if soup.find('a', href=lambda h: h and '/shop/' in h):
              details['is_business'] = True
@@ -418,12 +409,6 @@ class BazarakiScraper:
         Check all followed ads for changes.
         Returns a list of notifications (ad_data + notification_type + changed_fields).
         """
-        from shared.database import (
-            get_followed_ads, get_ad, add_history_entry, 
-            update_follow_check_status, update_ad_status, 
-            update_ad_price, update_ad_post_date
-        )
-        
         followed_ids = await get_followed_ads()
         if not followed_ids:
             return []
@@ -448,7 +433,6 @@ class BazarakiScraper:
                 if not html:
                     # 404 or Error
                     await update_follow_check_status(ad_id, increment_fail=True)
-                    from shared.database import get_ad_failed_checks
                     fails = await get_ad_failed_checks(ad_id)
                     
                     if fails >= 5 and ad_data.get('ad_status') != 'Disabled':

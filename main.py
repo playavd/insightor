@@ -4,11 +4,15 @@ import sys
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 
+import json
 from aiogram import Bot, Dispatcher, BaseMiddleware
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.exceptions import TelegramNetworkError, TelegramConflictError
+from aiohttp.client_exceptions import ClientConnectorError, ClientOSError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from shared.config import BOT_TOKEN, USER_BOT_TOKEN, ADMIN_ID, CHANNEL_ID, LOG_DIR
-from shared.database import init_db, get_active_alerts
+from shared.database import init_db, get_active_alerts, get_ad_followers, get_ad_history
 from shared.utils import format_ad_message, is_match
 
 from scraper_service.logic import BazarakiScraper
@@ -73,7 +77,6 @@ async def notify_user(notification_type: str, ad_data: dict):
             logger.debug(f"Notify User: Loaded {len(alerts)} active alerts.")
             
             notified_users = set()
-            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
             for alert in alerts:
                 user_id = alert['user_id']
@@ -81,7 +84,6 @@ async def notify_user(notification_type: str, ad_data: dict):
                     continue
 
                 filters = dict()
-                import json
                 try: filters = json.loads(alert['filters'])
                 except: continue
                 
@@ -138,8 +140,6 @@ async def scraper_job():
     follow_notifications = await scraper.check_followed_ads()
     if follow_notifications:
         logger.info(f"Processing {len(follow_notifications)} follow notifications.")
-        from shared.database import get_ad_followers, get_ad_history
-        from shared.utils import format_ad_message
         
         # Group by Ad ID to avoid fetching history/sending multiple times if logic allows
         # But notifications list is flat.
@@ -186,7 +186,6 @@ async def scraper_job():
             # Add link
             change_msg += f"<a href=\"{ad_data['ad_url']}\">{ad_data.get('car_brand')} {ad_data.get('car_model')}</a>"
 
-            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [
                     InlineKeyboardButton(text="Details", callback_data=f"more_details:{ad_id}"),
@@ -255,8 +254,6 @@ async def main():
 
 async def start_polling_safe(dp: Dispatcher, bot: Bot, name: str):
     """Run polling with infinite retry logic for network issues."""
-    from aiogram.exceptions import TelegramNetworkError
-    from aiohttp.client_exceptions import ClientConnectorError, ClientOSError
     
     while True:
         try:
