@@ -1,14 +1,37 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 
-def get_main_menu_kb():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🔔 New Alert"), KeyboardButton(text="🗂️ My Alerts")],
-            [KeyboardButton(text="🔍 Archive Search"), KeyboardButton(text="⭐ Pro")]
-        ],
-        resize_keyboard=True
-    )
+def get_main_menu_kb(alerts_count: int = 0, favorites_count: int = 0):
+    buttons = []
+    
+    # 1. New Alert vs My Alerts
+    if alerts_count == 0:
+        buttons.append(KeyboardButton(text="🔔 New Alert"))
+    else:
+        buttons.append(KeyboardButton(text="🗂️ My Alerts"))
+    
+    # 2. Favorites
+    if favorites_count > 0:
+        buttons.append(KeyboardButton(text="⭐ Favorites"))
+    
+    # 3. Archive
+    buttons.append(KeyboardButton(text="🔍 Archive"))
+    
+    # 4. Pro
+    buttons.append(KeyboardButton(text="⭐ Pro"))
+
+    # Chunk into rows of 2
+    keyboard = []
+    row = []
+    for btn in buttons:
+        row.append(btn)
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 def get_nav_kb(options: list[str] | None = None, include_any: bool = True):
     """

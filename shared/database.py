@@ -402,6 +402,36 @@ async def update_follow_check_status(ad_id: str, increment_fail: bool = False, r
                 await db.execute("UPDATE followed_ads SET failed_checks_count = failed_checks_count + 1 WHERE ad_id = ?", (ad_id,))
             await db.commit()
 
+async def get_user_alerts_count(user_id: int) -> int:
+    """Get total count of alerts (active or not) for a user."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM alerts WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
+async def get_user_followed_ads_count(user_id: int) -> int:
+    """Get count of ads followed by user."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM followed_ads WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
+async def get_user_followed_ads_paginated(user_id: int, offset: int = 0, limit: int = 5) -> List[dict[str, Any]]:
+    """Get followed ads for a user with pagination, joined with ad details."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        query = """
+            SELECT a.*, f.created_at as followed_at 
+            FROM followed_ads f
+            JOIN ads a ON f.ad_id = a.ad_id
+            WHERE f.user_id = ?
+            ORDER BY f.created_at DESC
+            LIMIT ? OFFSET ?
+        """
+        async with db.execute(query, (user_id, limit, offset)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
 async def get_ad_failed_checks(ad_id: str) -> int:
     """Get the max failed checks count for an ad (from any follower entry)."""
     async with aiosqlite.connect(DATABASE_PATH) as db:

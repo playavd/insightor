@@ -28,7 +28,13 @@ async def return_to_dashboard(message: types.Message, state: FSMContext):
 async def dash_cancel(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.delete()
-    await callback.message.answer("❌ Alert creation cancelled.", reply_markup=get_main_menu_kb())
+    
+    from shared.database import get_user_alerts_count, get_user_followed_ads_count
+    user_id = callback.from_user.id
+    alerts_cnt = await get_user_alerts_count(user_id)
+    fav_cnt = await get_user_followed_ads_count(user_id)
+    
+    await callback.message.answer("❌ Alert creation cancelled.", reply_markup=get_main_menu_kb(alerts_cnt, fav_cnt))
 
 @router.callback_query(F.data == "dash_save", StateFilter(AlertEditor))
 async def dash_save(callback: CallbackQuery, state: FSMContext):
@@ -49,9 +55,15 @@ async def dash_save(callback: CallbackQuery, state: FSMContext):
 
     await state.clear()
     await callback.message.delete()
+    
+    from shared.database import get_user_alerts_count, get_user_followed_ads_count
+    user_id = callback.from_user.id
+    alerts_cnt = await get_user_alerts_count(user_id)
+    fav_cnt = await get_user_followed_ads_count(user_id)
+
     await callback.message.answer(
         f"{msg_title}\n(You can manage it in 'My Alerts')",
-        reply_markup=get_main_menu_kb(),
+        reply_markup=get_main_menu_kb(alerts_cnt, fav_cnt),
         parse_mode="HTML"
     )
     

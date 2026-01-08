@@ -167,11 +167,19 @@ async def scraper_job():
             # For periodic notification: "bot periodicaly checks... and notify user about: Price changing..."
             
             # Let's use a concise format for the update notification, possibly with a "More details" button.
-            change_msg = f"🔔 <b>Update on Ad #{ad_id}</b>\n"
+            # Let's use a concise format for the update notification, possibly with a "More details" button.
+            change_msg = f"🔔 <b>Update on Ad #ad{ad_id}</b>\n\n"
+            
             if note['type'] == 'price_change':
                 change_msg += f"💰 {note['change']}\n"
             elif note['type'] == 'status_change':
-                change_msg += f"🆙 {note['change']}\n"
+                desc = str(note['change']).lower()
+                if 'deactivated' in desc:
+                     change_msg += f"\n⛔ <b>Deactivated</b>\n\n"
+                elif 'activated' in desc:
+                     change_msg += f"\n✅ <b>Activated</b>\n\n"
+                else:
+                     change_msg += f"🆙 {note['change']}\n"
             elif note['type'] == 'repost':
                 change_msg += f"🔄 Reposted\n"
             
