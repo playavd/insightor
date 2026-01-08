@@ -30,7 +30,7 @@ async def start_new_alert(message: types.Message, state: FSMContext):
     if active_count >= MAX_ALERTS_BASIC:
         await message.answer(
              f"🚫 <b>Alerts limit reached ({active_count}/{MAX_ALERTS_BASIC} active).</b>\n\n"
-             "Deactivate one in '🗂️ My Alerts', or upgrade to <b>⭐ Pro</b>.",
+             "Deactivate one in '🗂️ My Alerts', or upgrade to <b>🎖️ Pro</b>.",
              parse_mode="HTML"
         )
         return

@@ -18,7 +18,7 @@ def get_main_menu_kb(alerts_count: int = 0, favorites_count: int = 0):
     buttons.append(KeyboardButton(text="🔍 Archive"))
     
     # 4. Pro
-    buttons.append(KeyboardButton(text="⭐ Pro"))
+    buttons.append(KeyboardButton(text="🎖️ Pro"))
 
     # Chunk into rows of 2
     keyboard = []
