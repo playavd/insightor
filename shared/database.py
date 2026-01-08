@@ -72,6 +72,30 @@ async def init_db() -> None:
                 FOREIGN KEY(user_id) REFERENCES users(user_id)
             )
         """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS followed_ads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                ad_id TEXT,
+                created_at DATETIME,
+                failed_checks_count INTEGER DEFAULT 0,
+                FOREIGN KEY(user_id) REFERENCES users(user_id),
+                UNIQUE(user_id, ad_id)
+            )
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS ad_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ad_id TEXT,
+                change_type TEXT,
+                old_value TEXT,
+                new_value TEXT,
+                timestamp DATETIME,
+                FOREIGN KEY(ad_id) REFERENCES ads(ad_id)
+            )
+        """)
         
         # Migrations
         try:
@@ -247,14 +271,15 @@ async def get_user(user_id: int) -> Optional[dict[str, Any]]:
             row = await cursor.fetchone()
             return dict(row) if row else None
 
-async def create_alert(user_id: int, name: str, filters: dict) -> bool:
+async def create_alert(user_id: int, name: str, filters: dict) -> int:
     async with db_lock:
         async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute("INSERT INTO alerts (user_id, name, created_at, filters) VALUES (?, ?, ?, ?)",
+            cursor = await db.execute("INSERT INTO alerts (user_id, name, created_at, filters) VALUES (?, ?, ?, ?)",
                            (user_id, name, datetime.now(), json.dumps(filters)))
+            alert_id = cursor.lastrowid
             await db.execute("UPDATE users SET active_alerts_count = active_alerts_count + 1 WHERE user_id = ?", (user_id,))
             await db.commit()
-    return True
+            return alert_id
 
 async def get_user_alerts(user_id: int) -> List[dict[str, Any]]:
     async with aiosqlite.connect(DATABASE_PATH) as db:
@@ -322,3 +347,88 @@ async def get_active_alerts_count_by_user(user_id: int) -> int:
         async with db.execute("SELECT COUNT(*) FROM alerts WHERE user_id = ? AND is_active = 1", (user_id,)) as cursor:
             row = await cursor.fetchone()
             return row[0] if row else 0
+
+# --- FOLLOWED ADS & HISTORY ---
+
+async def follow_ad(user_id: int, ad_id: str) -> bool:
+    """
+    Toggle follow status for an ad.
+    Returns: True if now following, False if unfollowed.
+    """
+    async with db_lock:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            # Check if already following
+            async with db.execute("SELECT 1 FROM followed_ads WHERE user_id = ? AND ad_id = ?", (user_id, ad_id)) as cursor:
+                exists = await cursor.fetchone()
+            
+            if exists:
+                await db.execute("DELETE FROM followed_ads WHERE user_id = ? AND ad_id = ?", (user_id, ad_id))
+                await db.commit()
+                return False
+            else:
+                await db.execute(
+                    "INSERT INTO followed_ads (user_id, ad_id, created_at) VALUES (?, ?, ?)",
+                    (user_id, ad_id, datetime.now())
+                )
+                await db.commit()
+                return True
+
+async def is_ad_followed_by_user(user_id: int, ad_id: str) -> bool:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("SELECT 1 FROM followed_ads WHERE user_id = ? AND ad_id = ?", (user_id, ad_id)) as cursor:
+            return bool(await cursor.fetchone())
+
+async def get_followed_ads() -> List[str]:
+    """Get list of unique ad_ids that are being followed by at least one user."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("SELECT DISTINCT ad_id FROM followed_ads") as cursor:
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
+
+async def get_ad_followers(ad_id: str) -> List[int]:
+    """Get list of user_ids following a specific ad."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("SELECT user_id FROM followed_ads WHERE ad_id = ?", (ad_id,)) as cursor:
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
+
+async def update_follow_check_status(ad_id: str, increment_fail: bool = False, reset_fail: bool = False):
+    """Update failed checks count for a followed ad."""
+    async with db_lock:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            if reset_fail:
+                await db.execute("UPDATE followed_ads SET failed_checks_count = 0 WHERE ad_id = ?", (ad_id,))
+            elif increment_fail:
+                await db.execute("UPDATE followed_ads SET failed_checks_count = failed_checks_count + 1 WHERE ad_id = ?", (ad_id,))
+            await db.commit()
+
+async def get_ad_failed_checks(ad_id: str) -> int:
+    """Get the max failed checks count for an ad (from any follower entry)."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("SELECT MAX(failed_checks_count) FROM followed_ads WHERE ad_id = ?", (ad_id,)) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row and row[0] is not None else 0
+
+# --- AD HISTORY ---
+
+async def add_history_entry(ad_id: str, change_type: str, old_val: Any, new_val: Any):
+    """Log a change to the ad history."""
+    async with db_lock:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            await db.execute(
+                "INSERT INTO ad_history (ad_id, change_type, old_value, new_value, timestamp) VALUES (?, ?, ?, ?, ?)",
+                (ad_id, change_type, str(old_val), str(new_val), datetime.now())
+            )
+            await db.commit()
+
+async def get_ad_history(ad_id: str, limit: int = 50) -> List[dict[str, Any]]:
+    """Retrieve history for an ad."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM ad_history WHERE ad_id = ? ORDER BY timestamp DESC LIMIT ?", 
+            (ad_id, limit)
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+

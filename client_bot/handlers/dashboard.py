@@ -44,7 +44,7 @@ async def dash_save(callback: CallbackQuery, state: FSMContext):
         msg_title = "✅ <b>Alert Updated!</b>"
     else:
         name = f"Alert {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-        await create_alert(callback.from_user.id, name, filters)
+        alert_id = await create_alert(callback.from_user.id, name, filters)
         msg_title = f"✅ <b>Alert Saved!</b>\nName: {name}"
 
     await state.clear()
@@ -61,13 +61,27 @@ async def dash_save(callback: CallbackQuery, state: FSMContext):
     
     if matches:
         await callback.message.answer(f"🔎 Found {len(matches)} recent matches:")
+        
+        # Determine alert_id
+        current_alert_id = editing_id if editing_id else alert_id
+        
         for ad in matches:
             text = format_ad_message(ad, 'new')
             if text: 
-                # Prepend Alert Name for consistency (but NO buttons as requested)
-                # Name key is 'name' defined earlier
+                # Prepend Alert Name
                 final_text = f"🔔 <b>{name}</b>\n\n{text}"
-                await callback.message.answer(final_text, parse_mode="HTML")
+                
+                # Add standard buttons
+                buttons = [
+                   [
+                       InlineKeyboardButton(text="Follow", callback_data=f"toggle_follow:{ad['ad_id']}"),
+                       InlineKeyboardButton(text="Details", callback_data=f"more_details:{ad['ad_id']}"),
+                       InlineKeyboardButton(text="Deactivate", callback_data=f"toggle_alert:{current_alert_id}:off")
+                   ]
+                ]
+                kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+                
+                await callback.message.answer(final_text, parse_mode="HTML", reply_markup=kb)
     else:
         await callback.message.answer("ℹ️ No recent matches found.")
 

@@ -412,3 +412,154 @@ class BazarakiScraper:
         return new_ads_count
 
     # rescan_colors moved to maintenance.py
+
+    async def check_followed_ads(self) -> list[dict[str, Any]]:
+        """
+        Check all followed ads for changes.
+        Returns a list of notifications (ad_data + notification_type + changed_fields).
+        """
+        from shared.database import (
+            get_followed_ads, get_ad, add_history_entry, 
+            update_follow_check_status, update_ad_status, 
+            update_ad_price, update_ad_post_date
+        )
+        
+        followed_ids = await get_followed_ads()
+        if not followed_ids:
+            return []
+
+        logger.info(f"Checking {len(followed_ids)} followed ads...")
+        notifications = []
+
+        for ad_id in followed_ids:
+            try:
+                ad_data = await get_ad(ad_id)
+                if not ad_data:
+                    # Should not happen ideally
+                    continue
+
+                url = ad_data.get('ad_url')
+                if not url: continue
+
+                # Fetch Page
+                html = await self.fetch_page(url)
+                
+                # Check Availability
+                if not html:
+                    # 404 or Error
+                    await update_follow_check_status(ad_id, increment_fail=True)
+                    from shared.database import get_ad_failed_checks
+                    fails = await get_ad_failed_checks(ad_id)
+                    
+                    if fails >= 5 and ad_data.get('ad_status') != 'Disabled':
+                        # Mark as Deactivated
+                        await update_ad_status(ad_id, 'Disabled')
+                        await add_history_entry(ad_id, 'active', 'True', 'False')
+                        
+                        updated_ad = await get_ad(ad_id)
+                        notifications.append({
+                            'type': 'status_change',
+                            'ad': updated_ad,
+                            'change': 'deactivated'
+                        })
+                    continue
+                else:
+                    # Page Loaded -> Reset Fails
+                    await update_follow_check_status(ad_id, reset_fail=True)
+
+                # Parse basic availability from text
+                soup = BeautifulSoup(html, 'lxml')
+                
+                # Check "Ad expired" / "Sold" / "Deleted"
+                # Bazaraki specific: "This ad has expired" or similar
+                # We need to detect if it's deactivated but page still loads
+                is_active = True
+                if "expired" in soup.get_text().lower() or soup.find(class_='number-expired'): 
+                    is_active = False
+                
+                # Current DB State
+                db_price = ad_data['current_price']
+                db_status = ad_data['ad_status']
+                db_post_date = ad_data['post_date']
+                if isinstance(db_post_date, str):
+                    try: db_post_date = parse_date(db_post_date)
+                    except: pass
+                
+                # Parse New State
+                details = await self.fetch_ad_details(url)
+                if not details: continue # Failed to parse details?
+
+                # 1. Active State Change
+                if not is_active and db_status != 'Disabled':
+                    await update_ad_status(ad_id, 'Disabled')
+                    await add_history_entry(ad_id, 'active', 'True', 'False')
+                    updated_ad = await get_ad(ad_id)
+                    notifications.append({'type': 'status_change', 'ad': updated_ad, 'change': 'deactivated'})
+                    db_status = 'Disabled' # Update local var
+                
+                elif is_active and db_status == 'Disabled':
+                    await update_ad_status(ad_id, 'Basic') # Assume basic upon reactivation unless vip/top found
+                    await add_history_entry(ad_id, 'active', 'False', 'True')
+                    updated_ad = await get_ad(ad_id)
+                    notifications.append({'type': 'status_change', 'ad': updated_ad, 'change': 'activated'})
+                    db_status = 'Basic'
+
+                if not is_active:
+                    # Don't check price/repost if inactive
+                    await asyncio.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
+                    continue
+
+                # 2. Price Change
+                try:
+                    # Price scrape from details page might be different or same as list page
+                    # logic.parse_listing_page logic for price is robust, let's trust fetch_ad_details logic
+                    # fetch_ad_details doesn't return price explicitely? 
+                    # Right, fetch_ad_details extracts SPECS. We need price from the page.
+                    
+                    price = 0
+                    price_tag = soup.find(class_='advert__content-price') or soup.find('div', class_='price') or soup.find(class_='announcement-price__cost')
+                    if price_tag:
+                         text = price_tag.get_text(separator='|', strip=True)
+                         nums = [int(''.join(filter(str.isdigit, p))) for p in text.split('|') if any(c.isdigit() for c in p)]
+                         if nums: price = nums[0]
+                    
+                    if price and price != db_price:
+                        await update_ad_price(ad_id, price)
+                        await add_history_entry(ad_id, 'price', db_price, price)
+                        updated_ad = await get_ad(ad_id)
+                        notifications.append({'type': 'price_change', 'ad': updated_ad, 'change': f"{db_price} > {price}"})
+                except Exception as e:
+                    logger.error(f"Error checking price for {ad_id}: {e}")
+
+                # 3. Status Change (VIP/TOP)
+                # fetch_ad_details returns 'ad_status_update' if found
+                current_status = details.get('ad_status_update', 'Basic')
+                
+                # Don't overwrite VIP with Basic if we just missed the badge, be careful.
+                # Only update if we explicitly see VIP/TOP or if we are sure it's Basic.
+                # Safest is to only upgrade status or downgrade if sure. 
+                # For now let's trust the parser.
+                
+                if current_status != db_status and current_status in ['VIP', 'TOP']:
+                     await update_ad_status(ad_id, current_status)
+                     await add_history_entry(ad_id, 'status', db_status, current_status)
+                     updated_ad = await get_ad(ad_id)
+                     notifications.append({'type': 'status_change', 'ad': updated_ad, 'change': f"{db_status} > {current_status}"})
+                
+                # 4. Repost Check
+                current_post_date = details.get('post_date')
+                if current_post_date and db_post_date:
+                    try:
+                        if current_post_date > db_post_date:
+                            await update_ad_post_date(ad_id, current_post_date)
+                            await add_history_entry(ad_id, 'repost', str(db_post_date), str(current_post_date))
+                            updated_ad = await get_ad(ad_id)
+                            notifications.append({'type': 'repost', 'ad': updated_ad, 'change': 'reposted'})
+                    except: pass
+                
+                await asyncio.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
+
+            except Exception as e:
+                logger.error(f"Error checking followed ad {ad_id}: {e}")
+        
+        return notifications

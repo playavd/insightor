@@ -91,10 +91,15 @@ async def notify_user(notification_type: str, ad_data: dict):
                         # Append Alert Name
                         final_msg = f"🔔 <b>{alert['name']}</b>\n\n{msg_text}"
                         
-                        # Add Deactivate Button
-                        kb = InlineKeyboardMarkup(inline_keyboard=[
-                            [InlineKeyboardButton(text="🔕 Deactivate Alert", callback_data=f"toggle_alert:{alert['alert_id']}:off")]
-                        ])
+                        # Add Deactivate Button AND Follow Ad Button
+                        buttons = [
+                            [
+                                InlineKeyboardButton(text="Follow", callback_data=f"toggle_follow:{ad_data['ad_id']}"),
+                                InlineKeyboardButton(text="Details", callback_data=f"more_details:{ad_data['ad_id']}"),
+                                InlineKeyboardButton(text="Deactivate", callback_data=f"toggle_alert:{alert['alert_id']}:off")
+                            ]
+                        ]
+                        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
 
                         # Add timeout to prevent hanging the scraper cycle
                         await asyncio.wait_for(
@@ -129,6 +134,64 @@ async def scraper_job():
     # Run Cycle
     new_ads_count = await scraper.run_cycle(notify_callback=notify_user)
     
+    # Run Followed Ads Check
+    follow_notifications = await scraper.check_followed_ads()
+    if follow_notifications:
+        logger.info(f"Processing {len(follow_notifications)} follow notifications.")
+        from shared.database import get_ad_followers, get_ad_history
+        from shared.utils import format_ad_message
+        
+        # Group by Ad ID to avoid fetching history/sending multiple times if logic allows
+        # But notifications list is flat.
+        
+        for note in follow_notifications:
+            ad_data = note['ad']
+            ad_id = ad_data['ad_id']
+            # change_type = note['type']
+            
+            # Fetch History for Context
+            history = await get_ad_history(ad_id, limit=5)
+            
+            # Use 'details' format or standard? 
+            # Req: "combine the changes in same notification if many" -> check_followed_ads logic might produce multiple entries?
+            # Actually check_followed_ads produces one notification dict per check cycle per ad if any change happens, 
+            # but currently it appends for each change type.
+            # Let's Refine check_followed_ads in future to group return, but for now iterate.
+            
+            # We want to send updates to followers.
+            followers = await get_ad_followers(ad_id)
+            if not followers: continue
+
+            # For update notifications, we can use the 'details' template or a specific update template.
+            # Req: "Changes: ... show only last changes 50 records" is for "More Details".
+            # For periodic notification: "bot periodicaly checks... and notify user about: Price changing..."
+            
+            # Let's use a concise format for the update notification, possibly with a "More details" button.
+            change_msg = f"🔔 <b>Update on Ad #{ad_id}</b>\n"
+            if note['type'] == 'price_change':
+                change_msg += f"💰 {note['change']}\n"
+            elif note['type'] == 'status_change':
+                change_msg += f"🆙 {note['change']}\n"
+            elif note['type'] == 'repost':
+                change_msg += f"🔄 Reposted\n"
+            
+            # Add link
+            change_msg += f"<a href=\"{ad_data['ad_url']}\">{ad_data.get('car_brand')} {ad_data.get('car_model')}</a>"
+
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="Details", callback_data=f"more_details:{ad_id}"),
+                    InlineKeyboardButton(text="Unfollow", callback_data=f"toggle_follow:{ad_id}")
+                ]
+            ])
+            
+            for user_id in followers:
+                try:
+                    await user_bot.send_message(user_id, change_msg, parse_mode="HTML", reply_markup=kb)
+                except Exception as e:
+                    logger.warning(f"Failed to notify follower {user_id}: {e}")
+
     next_run = datetime.now() + timedelta(minutes=6)
     next_run_str = next_run.strftime('%H:%M:%S')
     logger.info(f"Cycle finished. Next run approx: {next_run_str}")
@@ -139,6 +202,7 @@ async def scraper_job():
             text = (
                 f"🏁 <b>Cycle Finished</b>\n"
                 f"✅ New Ads: {new_ads_count}\n"
+                f"👀 Followed Updates: {len(follow_notifications)}\n"
                 f"⏰ Next Run: {next_run_str} (approx)"
             )
             await admin_bot.send_message(target_id, text, parse_mode="HTML")
