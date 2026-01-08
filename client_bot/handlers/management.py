@@ -32,7 +32,12 @@ async def show_alert_list(message: types.Message, state: FSMContext):
     alerts = await get_user_alerts(user_id)
     
     if not alerts:
-        await message.answer("You have no alerts.", reply_markup=get_main_menu_kb())
+        # Fetch counts (fav might be > 0 even if alerts is 0)
+        from shared.database import get_user_alerts_count, get_user_followed_ads_count
+        alerts_cnt = await get_user_alerts_count(user_id)
+        fav_cnt = await get_user_followed_ads_count(user_id)
+        
+        await message.answer("You have no alerts.", reply_markup=get_main_menu_kb(alerts_cnt, fav_cnt))
         return
 
     builder = ReplyKeyboardBuilder()
@@ -53,7 +58,14 @@ async def process_alert_selection(message: types.Message, state: FSMContext):
     text = message.text
     if text == "⬅️ Back":
         await state.clear()
-        await message.answer("Main Menu", reply_markup=get_main_menu_kb())
+        
+        # Fetch counts for proper menu
+        from shared.database import get_user_alerts_count, get_user_followed_ads_count
+        user_id = message.from_user.id
+        alerts_cnt = await get_user_alerts_count(user_id)
+        fav_cnt = await get_user_followed_ads_count(user_id)
+        
+        await message.answer("Main Menu", reply_markup=get_main_menu_kb(alerts_cnt, fav_cnt))
         return
     
     if text == "🔔 New Alert":
@@ -111,7 +123,13 @@ async def process_alert_action(message: types.Message, state: FSMContext):
 
     if text == "🏠 Main Menu":
         await state.clear()
-        await message.answer("🏠 Main Menu", reply_markup=get_main_menu_kb())
+        
+        # Fetch counts for proper menu
+        from shared.database import get_user_alerts_count, get_user_followed_ads_count
+        alerts_cnt = await get_user_alerts_count(user_id)
+        fav_cnt = await get_user_followed_ads_count(user_id)
+        
+        await message.answer("🏠 Main Menu", reply_markup=get_main_menu_kb(alerts_cnt, fav_cnt))
         return
     
     if text in ["Activate", "Deactivate"]:

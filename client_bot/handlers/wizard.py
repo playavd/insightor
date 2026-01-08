@@ -64,8 +64,13 @@ async def process_brand(message: types.Message, state: FSMContext):
         # We need get_main_menu_kb. Import here to avoid cycle at top if needed, 
         # but utils should be fine.
         from client_bot.keyboards import get_main_menu_kb
+        from shared.database import get_user_alerts_count, get_user_followed_ads_count
+        user_id = message.from_user.id
+        alerts_cnt = await get_user_alerts_count(user_id)
+        fav_cnt = await get_user_followed_ads_count(user_id)
+        
         await state.clear()
-        await message.answer("Back to Main Menu", reply_markup=get_main_menu_kb())
+        await message.answer("Back to Main Menu", reply_markup=get_main_menu_kb(alerts_cnt, fav_cnt))
         return
 
     if text == "💾 Save & Finish":
