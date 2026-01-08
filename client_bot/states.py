@@ -37,3 +37,6 @@ class AlertEditor(StatesGroup):
 class AlertManagement(StatesGroup):
     ViewingList = State()
     ViewingDetail = State()
+
+class FavoriteAddition(StatesGroup):
+    WaitingForURL = State()
