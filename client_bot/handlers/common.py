@@ -21,9 +21,8 @@ async def cmd_start(message: types.Message):
     fav_cnt = await get_user_followed_ads_count(user.id)
     
     await message.answer(
-        f"👋 Hello, {user.first_name}!\n\n"
-        "I can help you monitor Bazaraki for new car ads.\n"
-        "Select an option to get started:",
+        f"👋 Hello, {user.first_name}!\n"
+        "Select an option to get started.",
         reply_markup=get_main_menu_kb(alerts_cnt, fav_cnt)
     )
 
