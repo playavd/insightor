@@ -78,6 +78,10 @@ async def dash_save(callback: CallbackQuery, state: FSMContext):
         # Determine alert_id
         current_alert_id = editing_id if editing_id else alert_id
         
+        # Pre-fetch followed status for efficiency
+        from shared.database import get_all_followed_ads_by_user
+        followed_ads = await get_all_followed_ads_by_user(callback.from_user.id)
+        
         for ad in matches:
             try:
                 text = format_ad_message(ad, 'new')
@@ -85,10 +89,14 @@ async def dash_save(callback: CallbackQuery, state: FSMContext):
                     # Prepend Alert Name
                     final_text = f"🔔 <b>{name}</b>\n\n{text}"
                     
+                    # Determine button text
+                    is_following = ad['ad_id'] in followed_ads
+                    follow_btn_text = "Unfollow" if is_following else "Follow"
+                    
                     # Add standard buttons
                     buttons = [
                        [
-                           InlineKeyboardButton(text="Follow", callback_data=f"toggle_follow:{ad['ad_id']}"),
+                           InlineKeyboardButton(text=follow_btn_text, callback_data=f"toggle_follow:{ad['ad_id']}"),
                            InlineKeyboardButton(text="Details", callback_data=f"more_details:{ad['ad_id']}"),
                            InlineKeyboardButton(text="Deactivate", callback_data=f"toggle_alert:{current_alert_id}:off")
                        ]

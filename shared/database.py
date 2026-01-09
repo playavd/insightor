@@ -399,6 +399,13 @@ async def get_ad_followers(ad_id: str) -> List[int]:
             rows = await cursor.fetchall()
             return [row[0] for row in rows]
 
+async def get_all_followed_ads_by_user(user_id: int) -> set[str]:
+    """Get a set of all ad_ids followed by a specific user."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("SELECT ad_id FROM followed_ads WHERE user_id = ?", (user_id,)) as cursor:
+            rows = await cursor.fetchall()
+            return {row[0] for row in rows}
+
 async def update_follow_check_status(ad_id: str, increment_fail: bool = False, reset_fail: bool = False):
     """Update failed checks count for a followed ad."""
     async with db_lock:

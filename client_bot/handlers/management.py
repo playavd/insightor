@@ -111,7 +111,9 @@ async def process_alert_selection(message: types.Message, state: FSMContext):
         [KeyboardButton(text="⬅️ Back"), KeyboardButton(text="🏠 Main Menu")]
     ], resize_keyboard=True)
     
-    await message.answer(f"📋 <b>Alert: {alert['name']}</b>\n{details_str}", reply_markup=kb, parse_mode="HTML")
+    import html
+    safe_name = html.escape(alert['name'])
+    await message.answer(f"📋 <b>Alert: {safe_name}</b>\n{details_str}", reply_markup=kb, parse_mode="HTML")
 
 @router.message(AlertManagement.ViewingDetail)
 async def process_alert_action(message: types.Message, state: FSMContext):
@@ -153,6 +155,10 @@ async def process_alert_action(message: types.Message, state: FSMContext):
                          # User requested specific transparency message
                          await msg.edit_text(f"🔎 Found {len(matches)} recent matches:")
                          
+                         # Pre-fetch followed status
+                         from shared.database import get_all_followed_ads_by_user
+                         followed_ads = await get_all_followed_ads_by_user(user_id)
+
                          for ad in matches:
                              try:
                                  t = format_ad_message(ad, 'new')
@@ -160,10 +166,14 @@ async def process_alert_action(message: types.Message, state: FSMContext):
                                      # Prepend Alert Name
                                      final_t = f"🔔 <b>{alert['name']}</b>\n\n{t}"
                                      
+                                     # Determine button text
+                                     is_following = ad['ad_id'] in followed_ads
+                                     follow_btn_text = "Unfollow" if is_following else "Follow"
+                                     
                                      # Add standard buttons
                                      buttons = [
                                         [
-                                            InlineKeyboardButton(text="Follow", callback_data=f"toggle_follow:{ad['ad_id']}"),
+                                            InlineKeyboardButton(text=follow_btn_text, callback_data=f"toggle_follow:{ad['ad_id']}"),
                                             InlineKeyboardButton(text="Details", callback_data=f"more_details:{ad['ad_id']}"),
                                             InlineKeyboardButton(text="Deactivate", callback_data=f"toggle_alert:{alert_id}:off")
                                         ]
