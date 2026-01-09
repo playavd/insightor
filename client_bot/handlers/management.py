@@ -1,3 +1,4 @@
+
 import logging
 import json
 from aiogram import Router, types, F
@@ -110,7 +111,9 @@ async def process_alert_selection(message: types.Message, state: FSMContext):
         [KeyboardButton(text="⬅️ Back"), KeyboardButton(text="🏠 Main Menu")]
     ], resize_keyboard=True)
     
-    await message.answer(f"📋 <b>Alert: {alert['name']}</b>\n{details_str}", reply_markup=kb, parse_mode="HTML")
+    import html
+    safe_name = html.escape(alert['name'])
+    await message.answer(f"📋 <b>Alert: {safe_name}</b>\n{details_str}", reply_markup=kb, parse_mode="HTML")
 
 @router.message(AlertManagement.ViewingDetail)
 async def process_alert_action(message: types.Message, state: FSMContext):
@@ -142,27 +145,51 @@ async def process_alert_action(message: types.Message, state: FSMContext):
              alert = await get_alert(alert_id)
              if alert:
                  msg = await message.answer("🔎 Searching recent matches...")
-                 fs = json.loads(alert['filters'])
-                 matches = await get_latest_matching_ads(fs, limit=5)
-                 await msg.delete()
-                 
-                 for ad in matches:
-                     t = format_ad_message(ad, 'new')
-                     if t:
-                         # Prepend Alert Name
-                         final_t = f"🔔 <b>{alert['name']}</b>\n\n{t}"
+                 try:
+                     fs = json.loads(alert['filters'])
+                     matches = await get_latest_matching_ads(fs, limit=5)
+                     
+                     if not matches:
+                         await msg.edit_text("✅ Alert Activated. No recent matches found.")
+                     else:
+                         # User requested specific transparency message
+                         await msg.edit_text(f"🔎 Found {len(matches)} recent matches:")
                          
-                         # Add standard buttons
-                         buttons = [
-                            [
-                                InlineKeyboardButton(text="Follow", callback_data=f"toggle_follow:{ad['ad_id']}"),
-                                InlineKeyboardButton(text="Details", callback_data=f"more_details:{ad['ad_id']}"),
-                                InlineKeyboardButton(text="Deactivate", callback_data=f"toggle_alert:{alert_id}:off")
-                            ]
-                         ]
-                         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+                         # Pre-fetch followed status
+                         from shared.database import get_all_followed_ads_by_user
+                         followed_ads = await get_all_followed_ads_by_user(user_id)
+
+                         for ad in matches:
+                             try:
+                                 t = format_ad_message(ad, 'new')
+                                 if t:
+                                     # Prepend Alert Name
+                                     final_t = f"🔔 <b>{alert['name']}</b>\n\n{t}"
+                                     
+                                     # Determine button text
+                                     is_following = ad['ad_id'] in followed_ads
+                                     follow_btn_text = "Unfollow" if is_following else "Follow"
+                                     
+                                     # Add standard buttons
+                                     buttons = [
+                                        [
+                                            InlineKeyboardButton(text=follow_btn_text, callback_data=f"toggle_follow:{ad['ad_id']}"),
+                                            InlineKeyboardButton(text="Details", callback_data=f"more_details:{ad['ad_id']}"),
+                                            InlineKeyboardButton(text="Deactivate", callback_data=f"toggle_alert:{alert_id}:off")
+                                        ]
+                                     ]
+                                     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+                                     
+                                     await message.answer(final_t, parse_mode="HTML", reply_markup=kb)
+                             except Exception as e:
+                                 logger.error(f"Failed to send match {ad.get('ad_id')}: {e}")
                          
-                         await message.answer(final_t, parse_mode="HTML", reply_markup=kb)
+                         # We do NOT delete the "Found matches" message, as it serves as a header/summary.
+
+                 except Exception as e:
+                     logger.error(f"Error fetching matches for alert {alert_id}: {e}")
+                     await msg.edit_text("✅ Alert Activated. (Error fetching matches)")
+
         await show_alert_list(message, state)
         return
 
@@ -245,8 +272,6 @@ async def process_toggle_alert_callback(callback: CallbackQuery):
         status_text = "activated" if is_active else "deactivated"
         await callback.answer(f"Alert {status_text}.")
         
-
-        
     except Exception as e:
         logger.error(f"Callback toggle error: {e}")
         await callback.answer("Error updating alert.", show_alert=True)
@@ -307,7 +332,23 @@ async def process_more_details(callback: CallbackQuery):
         
         try:
             # Try to edit the existing message
-            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=callback.message.reply_markup)
+            # Reconstruct keyboard: Remove "Details" button
+            new_kb = None
+            if callback.message.reply_markup and callback.message.reply_markup.inline_keyboard:
+                new_rows = []
+                for row in callback.message.reply_markup.inline_keyboard:
+                    new_row = []
+                    for btn in row:
+                        # Filter out buttons that are "Details" or call "more_details"
+                        if btn.text == "Details" or (btn.callback_data and btn.callback_data.startswith("more_details:")):
+                            continue
+                        new_row.append(btn)
+                    if new_row:
+                        new_rows.append(new_row)
+                if new_rows:
+                    new_kb = InlineKeyboardMarkup(inline_keyboard=new_rows)
+
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=new_kb)
         except Exception:
             # Fallback: send as new message if edit fails (e.g. too old)
             await callback.message.answer(text, parse_mode="HTML")

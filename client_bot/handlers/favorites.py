@@ -147,7 +147,7 @@ async def on_fav_add_url(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 @router.message(F.text, StateFilter(FavoriteAddition.WaitingForURL))
-async def process_fav_url_input(message: types.Message, state: FSMContext):
+async def process_fav_url_input(message: types.Message, state: FSMContext, scraper: BazarakiScraper):
     url = message.text.strip()
     
     if url in ["/cancel", "❌ Cancel"]:
@@ -189,7 +189,8 @@ async def process_fav_url_input(message: types.Message, state: FSMContext):
         # Not followed -> Scrape
         status_msg = await message.answer("🔎 Checking link...")
         
-        scraper = BazarakiScraper()
+        # Scraper injected via middleware
+
         
         details = await scraper.fetch_ad_details(url)
         
@@ -291,11 +292,19 @@ async def process_fav_url_input(message: types.Message, state: FSMContext):
         await add_ad(full_ad)
         await follow_ad(user_id, ad_id)
         
-        await status_msg.edit_text("✅ <b>Ad Added to Favorites!</b>", parse_mode="HTML")
-        await state.clear()
+        # Show detailed view immediately
+        text = format_ad_message(full_ad, 'detailed')
         
-        # Show updated Favorites list
-        await show_favorites_page(message, message.from_user.id, 0)
+        buttons = [
+            [
+                InlineKeyboardButton(text="Unfollow", callback_data=f"toggle_follow:{ad_id}"),
+                InlineKeyboardButton(text="🔗 Open on Site", url=full_ad['ad_url'])
+            ],
+            [InlineKeyboardButton(text="🔙 Back to List", callback_data="fav_close")]
+        ]
+        
+        await status_msg.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        await state.clear()
         
     except Exception as e:
         logger.error(f"Error adding fav url: {e}")

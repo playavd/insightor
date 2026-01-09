@@ -183,6 +183,12 @@ async def touch_ad(ad_id: str) -> None:
             await db.execute("UPDATE ads SET last_checked = ? WHERE ad_id = ?", (datetime.now(), ad_id))
             await db.commit()
 
+async def update_ad_business(ad_id: str, is_business: bool) -> None:
+    async with db_lock:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            await db.execute("UPDATE ads SET is_business = ? WHERE ad_id = ?", (is_business, ad_id))
+            await db.commit()
+
 async def get_all_ads() -> List[dict[str, Any]]:
     """Retrieve all ads usage for export."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
@@ -364,6 +370,7 @@ async def follow_ad(user_id: int, ad_id: str) -> bool:
             if exists:
                 await db.execute("DELETE FROM followed_ads WHERE user_id = ? AND ad_id = ?", (user_id, ad_id))
                 await db.commit()
+                logger.info(f"User {user_id} unfollowed ad {ad_id}")
                 return False
             else:
                 await db.execute(
@@ -391,6 +398,13 @@ async def get_ad_followers(ad_id: str) -> List[int]:
         async with db.execute("SELECT user_id FROM followed_ads WHERE ad_id = ?", (ad_id,)) as cursor:
             rows = await cursor.fetchall()
             return [row[0] for row in rows]
+
+async def get_all_followed_ads_by_user(user_id: int) -> set[str]:
+    """Get a set of all ad_ids followed by a specific user."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("SELECT ad_id FROM followed_ads WHERE user_id = ?", (user_id,)) as cursor:
+            rows = await cursor.fetchall()
+            return {row[0] for row in rows}
 
 async def update_follow_check_status(ad_id: str, increment_fail: bool = False, reset_fail: bool = False):
     """Update failed checks count for a followed ad."""

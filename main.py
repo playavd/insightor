@@ -239,6 +239,7 @@ async def main():
     
     # Setup User Bot
     dp_user.include_router(user_router)
+    dp_user.workflow_data.update(scraper=scraper)
     
     tasks = []
     logger.info("Admin Bot polling starting...")
