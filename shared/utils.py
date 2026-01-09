@@ -136,6 +136,8 @@ def format_ad_message(ad_data: AdData | dict[str, Any], notification_type: str =
             seller_info += f" (#id{seller_id})"
 
         msg_text = ""
+        ad_id_tag = f"#ad{ad_data.get('ad_id', '')}"
+        
         if notification_type == 'new':
             import html
             safe_title = html.escape(title)
@@ -143,7 +145,7 @@ def format_ad_message(ad_data: AdData | dict[str, Any], notification_type: str =
             safe_gear = html.escape(gear)
             safe_seller = html.escape(seller_info)
             msg_text = (
-                f"{status_prefix} <a href=\"{ad_data['ad_url']}\">{safe_title}</a>\n"
+                f"{status_prefix} <a href=\"{ad_data['ad_url']}\">{safe_title}</a> {ad_id_tag}\n"
                 f"💰 <b>{ad_data['current_price']} €</b>  ⏱️ {mileage_str}\n"
                 f"⛽ {safe_fuel}  ⚙️ {safe_gear}  🧩 {engine}\n"
                 f"👤 {safe_seller}"
@@ -153,7 +155,7 @@ def format_ad_message(ad_data: AdData | dict[str, Any], notification_type: str =
             safe_title = html.escape(title)
             old = ad_data.get('old_status', 'Basic')
             msg_text = (
-                f"🆙 <b>Status Update</b> ({old} ➜ {status})\n"
+                f"🆙 <b>Status Update</b> ({old} ➜ {status}) {ad_id_tag}\n"
                 f"<a href=\"{ad_data['ad_url']}\">{safe_title}</a>\n"
                 f"💰 {ad_data['current_price']} €"
             )
@@ -162,7 +164,7 @@ def format_ad_message(ad_data: AdData | dict[str, Any], notification_type: str =
             safe_brand = html.escape(brand)
             safe_model = html.escape(model)
             msg_text = (
-                f"🔄 <b>Ad Reposted!</b>\n"
+                f"🔄 <b>Ad Reposted!</b> {ad_id_tag}\n"
                 f"The ad was bumped to the top.\n"
                 f"🔗 <a href=\"{ad_data['ad_url']}\">{safe_brand} {safe_model}</a>"
             )
@@ -208,11 +210,11 @@ def format_ad_message(ad_data: AdData | dict[str, Any], notification_type: str =
 
             msg_text = (
                 f"ℹ️ <b>Details for Ad #ad{ad_data['ad_id']}</b>\n"
-                f"👀 First seen: {first_seen_str}\n"
+                f"👀 First seen: {first_seen_str}\n\n"
                 f"🚗 <a href=\"{ad_data['ad_url']}\">{safe_title}</a>{status_display}\n"
-                f"💰 Initial price was {init_price} €  ⏱️ {mileage_str}\n"
+                f"💰 First seen price {init_price} €  ⏱️ {mileage_str}\n"
                 f"⛽ {safe_fuel}  ⚙️ {safe_gear}  🧩 {engine}\n"
-                f"{seller_str}\n"
+                f"{seller_str}\n\n"
             )
             
             if not history:

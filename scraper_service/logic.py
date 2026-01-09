@@ -237,18 +237,19 @@ class BazarakiScraper:
         # 1. Check for "distinctions" badge (often used for Pro/Business sellers)
         if soup.find(class_='author-distinctions__item') or soup.find(class_='verification-badge'):
              details['is_business'] = True
-             logger.info(f"Detected Business via Badge for {url}")
+             details['is_business'] = True
+             logger.debug(f"Detected Business via Badge for {url}")
         
         # 3. Check for dedicated "Shop" link
         if soup.find('a', href=lambda h: h and '/shop/' in h):
              details['is_business'] = True
-             logger.info(f"Detected Business via Shop Link for {url}")
+             logger.debug(f"Detected Business via Shop Link for {url}")
              
         # 4. Reliable Check: "js-show-popup-contact-business"
         # This class appears on the contact button for business accounts
         if soup.find(class_='js-show-popup-contact-business'):
              details['is_business'] = True
-             logger.info(f"Detected Business via Contact Popup Class for {url}")
+             logger.debug(f"Detected Business via Contact Popup Class for {url}")
         
         # Check Status in details
         if soup.find(class_='ribbon-vip') or soup.find(class_='label-vip'):
@@ -413,7 +414,7 @@ class BazarakiScraper:
         if not followed_ids:
             return []
 
-        logger.info(f"Checking {len(followed_ids)} followed ads...")
+        logger.info(f"Checking {len(followed_ids)} followed ads: {followed_ids}")
         notifications = []
 
         for ad_id in followed_ids:
@@ -519,6 +520,9 @@ class BazarakiScraper:
                 # fetch_ad_details returns 'ad_status_update' if found
                 current_status = details.get('ad_status_update', 'Basic')
                 
+                # Business check removed as per requirement (only check on initial follow)
+
+
                 # Don't overwrite VIP with Basic if we just missed the badge, be careful.
                 # Only update if we explicitly see VIP/TOP or if we are sure it's Basic.
                 # Safest is to only upgrade status or downgrade if sure. 

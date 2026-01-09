@@ -3,8 +3,9 @@ from datetime import datetime
 from aiogram import Router, types, F
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardButton
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+
 
 from shared.database import (
     update_alert, create_alert, get_latest_matching_ads, get_distinct_values, get_alert
@@ -78,22 +79,25 @@ async def dash_save(callback: CallbackQuery, state: FSMContext):
         current_alert_id = editing_id if editing_id else alert_id
         
         for ad in matches:
-            text = format_ad_message(ad, 'new')
-            if text: 
-                # Prepend Alert Name
-                final_text = f"🔔 <b>{name}</b>\n\n{text}"
-                
-                # Add standard buttons
-                buttons = [
-                   [
-                       InlineKeyboardButton(text="Follow", callback_data=f"toggle_follow:{ad['ad_id']}"),
-                       InlineKeyboardButton(text="Details", callback_data=f"more_details:{ad['ad_id']}"),
-                       InlineKeyboardButton(text="Deactivate", callback_data=f"toggle_alert:{current_alert_id}:off")
-                   ]
-                ]
-                kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-                
-                await callback.message.answer(final_text, parse_mode="HTML", reply_markup=kb)
+            try:
+                text = format_ad_message(ad, 'new')
+                if text: 
+                    # Prepend Alert Name
+                    final_text = f"🔔 <b>{name}</b>\n\n{text}"
+                    
+                    # Add standard buttons
+                    buttons = [
+                       [
+                           InlineKeyboardButton(text="Follow", callback_data=f"toggle_follow:{ad['ad_id']}"),
+                           InlineKeyboardButton(text="Details", callback_data=f"more_details:{ad['ad_id']}"),
+                           InlineKeyboardButton(text="Deactivate", callback_data=f"toggle_alert:{current_alert_id}:off")
+                       ]
+                    ]
+                    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+                    
+                    await callback.message.answer(final_text, parse_mode="HTML", reply_markup=kb)
+            except Exception as e:
+                logger.error(f"Failed to send match {ad.get('ad_id')}: {e}")
     else:
         await callback.message.answer("ℹ️ No recent matches found.")
 
