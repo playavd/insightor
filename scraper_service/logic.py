@@ -2,9 +2,9 @@ import asyncio
 import cloudscraper
 import logging
 import random
-from bs4 import BeautifulSoup
-from datetime import datetime, date
-from typing import Callable, Any
+from bs4 import BeautifulSoup, Tag
+from datetime import datetime
+from typing import Any, Optional
 
 from shared.constants import (
     BASE_URL, SEARCH_URL, REQUEST_DELAY_MIN, REQUEST_DELAY_MAX, 
@@ -12,7 +12,7 @@ from shared.constants import (
 )
 from shared.database import (
     add_ad, get_ad, update_ad_price, update_ad_post_date, touch_ad, 
-    update_ad_status, update_ad_color, get_followed_ads, 
+    update_ad_status, get_followed_ads, 
     add_history_entry, update_follow_check_status, get_ad_failed_checks
 )
 from shared.utils import AdData
@@ -60,6 +60,40 @@ class BazarakiScraper:
         except Exception as e:
             logger.error(f"Error fetching {url}: {e}")
             return None
+    
+    def _extract_price(self, tag: Optional[Tag]) -> int:
+        """Helper to extract price from a price tag."""
+        if not tag:
+            return 0
+        try:
+            text = tag.get_text(separator='|', strip=True)
+            # Extract all numbers from "10 000 | 12 000"
+            found_prices = [int(''.join(filter(str.isdigit, p))) for p in text.split('|') if any(c.isdigit() for c in p)]
+            if found_prices:
+                return min(found_prices)
+        except ValueError:
+            logger.warning(f"Failed to parse price from: {text}")
+        return 0
+
+    def _detect_business_status(self, soup: BeautifulSoup, url: str) -> bool:
+        """Helper to check if ad is from a business account."""
+        # 1. Check for "distinctions" badge (often used for Pro/Business sellers)
+        if soup.find(class_='author-distinctions__item') or soup.find(class_='verification-badge'):
+             logger.debug(f"Detected Business via Badge for {url}")
+             return True
+        
+        # 2. Check for dedicated "Shop" link
+        if soup.find('a', href=lambda h: h and '/shop/' in h):
+             logger.debug(f"Detected Business via Shop Link for {url}")
+             return True
+             
+        # 3. Reliable Check: "js-show-popup-contact-business"
+        # This class appears on the contact button for business accounts
+        if soup.find(class_='js-show-popup-contact-business'):
+             logger.debug(f"Detected Business via Contact Popup Class for {url}")
+             return True
+        
+        return False
 
     def parse_listing_page(self, html: str) -> list[dict[str, Any]]:
         """Parse the listing page and extract ad cards."""
@@ -96,17 +130,8 @@ class BazarakiScraper:
                 full_url = f"{BASE_URL}{href}"
                 
                 # Extract Price
-                price = 0
                 price_tag = item.find(class_='advert__content-price') or item.find('p', class_='price')
-                if price_tag:
-                     try:
-                        text = price_tag.get_text(separator='|', strip=True)
-                        # Extract all numbers from "10 000 | 12 000"
-                        found_prices = [int(''.join(filter(str.isdigit, p))) for p in text.split('|') if any(c.isdigit() for c in p)]
-                        if found_prices:
-                            price = min(found_prices)
-                     except ValueError:
-                        logger.warning(f"Failed to parse price from: {text}")
+                price = self._extract_price(price_tag)
 
                 # Status
                 is_vip = item.has_attr('data-t-vip') or item.find(attrs={"data-t-vip": True}) or item.find(class_='ribbon-vip')
@@ -118,10 +143,6 @@ class BazarakiScraper:
                 date_tag = item.find(class_='list-simple__time')
                 post_date = parse_date(date_tag.get_text(strip=True)) if date_tag else None
                 
-                if not post_date:
-                    # Date missing on listing page, will handle in run_cycle
-                    pass
-
                 ads.append({
                     'ad_id': ad_id,
                     'ad_url': full_url,
@@ -233,23 +254,9 @@ class BazarakiScraper:
                  if link:
                      details['user_id'] = link['href'].strip('/').split('/')[-1]
         
-        # IMPROVED Business Check
-        # 1. Check for "distinctions" badge (often used for Pro/Business sellers)
-        if soup.find(class_='author-distinctions__item') or soup.find(class_='verification-badge'):
-             details['is_business'] = True
-             details['is_business'] = True
-             logger.debug(f"Detected Business via Badge for {url}")
-        
-        # 3. Check for dedicated "Shop" link
-        if soup.find('a', href=lambda h: h and '/shop/' in h):
-             details['is_business'] = True
-             logger.debug(f"Detected Business via Shop Link for {url}")
-             
-        # 4. Reliable Check: "js-show-popup-contact-business"
-        # This class appears on the contact button for business accounts
-        if soup.find(class_='js-show-popup-contact-business'):
-             details['is_business'] = True
-             logger.debug(f"Detected Business via Contact Popup Class for {url}")
+        # Improved Business Check
+        if self._detect_business_status(soup, url):
+            details['is_business'] = True
         
         # Check Status in details
         if soup.find(class_='ribbon-vip') or soup.find(class_='label-vip'):
@@ -496,17 +503,8 @@ class BazarakiScraper:
 
                 # 2. Price Change
                 try:
-                    # Price scrape from details page might be different or same as list page
-                    # logic.parse_listing_page logic for price is robust, let's trust fetch_ad_details logic
-                    # fetch_ad_details doesn't return price explicitely? 
-                    # Right, fetch_ad_details extracts SPECS. We need price from the page.
-                    
-                    price = 0
                     price_tag = soup.find(class_='advert__content-price') or soup.find('div', class_='price') or soup.find(class_='announcement-price__cost')
-                    if price_tag:
-                         text = price_tag.get_text(separator='|', strip=True)
-                         nums = [int(''.join(filter(str.isdigit, p))) for p in text.split('|') if any(c.isdigit() for c in p)]
-                         if nums: price = nums[0]
+                    price = self._extract_price(price_tag)
                     
                     if price and price != db_price:
                         await update_ad_price(ad_id, price)
@@ -519,14 +517,6 @@ class BazarakiScraper:
                 # 3. Status Change (VIP/TOP)
                 # fetch_ad_details returns 'ad_status_update' if found
                 current_status = details.get('ad_status_update', 'Basic')
-                
-                # Business check removed as per requirement (only check on initial follow)
-
-
-                # Don't overwrite VIP with Basic if we just missed the badge, be careful.
-                # Only update if we explicitly see VIP/TOP or if we are sure it's Basic.
-                # Safest is to only upgrade status or downgrade if sure. 
-                # For now let's trust the parser.
                 
                 if current_status != db_status and current_status in ['VIP', 'TOP']:
                      await update_ad_status(ad_id, current_status)

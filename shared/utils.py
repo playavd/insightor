@@ -1,7 +1,8 @@
 import logging
 import json
+import html
 from datetime import datetime, date
-from typing import TypedDict, Any
+from typing import TypedDict, Any, Dict, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ class AdData(TypedDict):
     is_business: bool | None
     ad_status: str
 
-def is_match(ad: AdData | dict[str, Any], filters: dict) -> bool:
+def is_match(ad: Union[AdData, Dict[str, Any]], filters: dict) -> bool:
     """
     Check if ad matches alert filters.
     Centralized matching logic used by both Scraper notifications and User Alerts.
@@ -105,7 +106,15 @@ def is_match(ad: AdData | dict[str, Any], filters: dict) -> bool:
         logger.error(f"Error matching ad: {e}")
         return False
 
-def format_ad_message(ad_data: AdData | dict[str, Any], notification_type: str = 'new', history: list[dict[str, Any]] = None) -> str | None:
+def get_status_display(status: str) -> str:
+    """Helper to get formatted status string."""
+    status = status or 'Basic'
+    if status == 'VIP': return " 🌟 VIP"
+    elif status == 'TOP': return " 🔥 TOP"
+    elif status == 'VIP+TOP': return " 🌟 VIP 🔥 TOP"
+    return ""
+
+def format_ad_message(ad_data: Union[AdData, Dict[str, Any]], notification_type: str = 'new', history: Optional[List[Dict[str, Any]]] = None) -> Optional[str]:
     """Format ad data into a message string."""
     try:
         brand = ad_data.get('car_brand', 'Unknown') or 'Unknown'
@@ -139,7 +148,6 @@ def format_ad_message(ad_data: AdData | dict[str, Any], notification_type: str =
         ad_id_tag = f"#ad{ad_data.get('ad_id', '')}"
         
         if notification_type == 'new':
-            import html
             safe_title = html.escape(title)
             safe_fuel = html.escape(fuel)
             safe_gear = html.escape(gear)
@@ -151,7 +159,6 @@ def format_ad_message(ad_data: AdData | dict[str, Any], notification_type: str =
                 f"👤 {safe_seller}"
             )
         elif notification_type == 'status':
-            import html
             safe_title = html.escape(title)
             old = ad_data.get('old_status', 'Basic')
             msg_text = (
@@ -160,7 +167,6 @@ def format_ad_message(ad_data: AdData | dict[str, Any], notification_type: str =
                 f"💰 {ad_data['current_price']} €"
             )
         elif notification_type == 'repost':
-            import html
             safe_brand = html.escape(brand)
             safe_model = html.escape(model)
             msg_text = (
@@ -170,17 +176,13 @@ def format_ad_message(ad_data: AdData | dict[str, Any], notification_type: str =
             )
 
         elif notification_type == 'detailed':
-            import html
             safe_title = html.escape(title)
             safe_fuel = html.escape(fuel)
             safe_gear = html.escape(gear)
             safe_seller = html.escape(seller)
             
             # Status visualization
-            status_display = ""
-            if status == 'VIP': status_display = " 🌟 VIP"
-            elif status == 'TOP': status_display = " 🔥 TOP"
-            elif status == 'VIP+TOP': status_display = " 🌟 VIP 🔥 TOP"
+            status_display = get_status_display(status)
 
             # Init Price
             init_price = ad_data.get('initial_price', ad_data.get('current_price'))

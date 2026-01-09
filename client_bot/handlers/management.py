@@ -164,7 +164,9 @@ async def process_alert_action(message: types.Message, state: FSMContext):
                                  t = format_ad_message(ad, 'new')
                                  if t:
                                      # Prepend Alert Name
-                                     final_t = f"🔔 <b>{alert['name']}</b>\n\n{t}"
+                                     import html
+                                     safe_alert_name = html.escape(alert['name'])
+                                     final_t = f"🔔 <b>{safe_alert_name}</b>\n\n{t}"
                                      
                                      # Determine button text
                                      is_following = ad['ad_id'] in followed_ads

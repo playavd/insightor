@@ -8,7 +8,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
 from shared.database import (
-    update_alert, create_alert, get_latest_matching_ads, get_distinct_values, get_alert
+    update_alert, create_alert, get_latest_matching_ads, get_distinct_values, get_alert,
+    get_user_alerts_count, get_user_followed_ads_count, get_all_followed_ads_by_user
 )
 from shared.utils import format_ad_message
 from client_bot.states import AlertEditor
@@ -30,7 +31,6 @@ async def dash_cancel(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.delete()
     
-    from shared.database import get_user_alerts_count, get_user_followed_ads_count
     user_id = callback.from_user.id
     alerts_cnt = await get_user_alerts_count(user_id)
     fav_cnt = await get_user_followed_ads_count(user_id)
@@ -57,7 +57,6 @@ async def dash_save(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.delete()
     
-    from shared.database import get_user_alerts_count, get_user_followed_ads_count
     user_id = callback.from_user.id
     alerts_cnt = await get_user_alerts_count(user_id)
     fav_cnt = await get_user_followed_ads_count(user_id)
@@ -79,7 +78,6 @@ async def dash_save(callback: CallbackQuery, state: FSMContext):
         current_alert_id = editing_id if editing_id else alert_id
         
         # Pre-fetch followed status for efficiency
-        from shared.database import get_all_followed_ads_by_user
         followed_ads = await get_all_followed_ads_by_user(callback.from_user.id)
         
         for ad in matches:
