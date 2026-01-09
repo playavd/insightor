@@ -3,7 +3,7 @@ import asyncio
 import logging
 import json
 from datetime import datetime
-from typing import TypedDict, Any, List, Optional
+from typing import TypedDict, Any, List, Optional, Dict
 
 # Local imports
 from .config import DATABASE_PATH
@@ -108,12 +108,13 @@ async def init_db() -> None:
 
 # --- ADS CRUD ---
 
+# --- ADS CRUD ---
+
 async def add_ad(ad_data: AdData) -> None:
     """Insert a new ad into the database."""
-    params = ad_data.copy() # type: ignore
-    params['last_checked'] = params['first_seen'] # type: ignore
-    if 'car_color' not in params:
-        params['car_color'] = None # type: ignore
+    params: Dict[str, Any] = dict(ad_data)
+    params['last_checked'] = params['first_seen']
+    params.setdefault('car_color', None)
 
     query = """
         INSERT OR IGNORE INTO ads (

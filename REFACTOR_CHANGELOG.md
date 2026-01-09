@@ -22,6 +22,24 @@ This refactor focused on cleaning up technical debt, removing dead code, and sta
 - **`client_bot/handlers/favorites.py`**:
   - **Critical Fix**: Fixed a type error in `process_fav_url_input` where `show_favorites_page` was called with an `int` (`user_id`) as the first argument instead of a `Message` object. This would have caused a runtime error when trying to navigate back from an invalid URL input.
 
+### 4. **2026-01-09 Refactor Logic Cleanup**
+- **Duplication Removal**:
+  - `scraper_service/logic.py`: Extracted `_extract_price` and `_detect_business_status` helper methods to remove duplicated logic found in listing parsing, detail parsing, and follow checks.
+  - `shared/utils.py`: Extracted `get_status_display` to handle VIP/TOP label formatting in one place.
+- **Complexity Reduction**:
+  - `main.py`: Decomposed `notify_user` and `scraper_job` into smaller helper functions (`_notify_admin`, `_notify_matching_users`, `process_follow_notifications`).
+- **Code Cleanliness**:
+  - `client_bot/handlers/dashboard.py`: Removed inline imports, moving them to module level.
+  - `shared/database.py`: Improved imports and type hinting.
+
+### 5. **2026-01-09 Hotfix: Alert Notification Bug**
+- **Bug**: Alerts with special characters (e.g., `<` in `<100k`) caused Telegram `Bad Request: can't parse entities`.
+- **Fix**: Added `html.escape(alert['name'])` in `main.py` before constructing the notification message.
+
+### 6. **2026-01-09 Hotfix: Management Bug**
+- **Bug**: Similar to `main.py`, `client_bot/handlers/management.py` also injected `alert['name']` unsafely when Activating an alert.
+- **Fix**: Applied `html.escape(alert['name'])` properly in the management handler.
+
 ## Behavior Consistency
 - No changes were made to filter logic, DB schema, Telegram message formats, or user workflows.
 - The scraper's request delays and anti-detection mechanisms remain untouched.

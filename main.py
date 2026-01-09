@@ -1,10 +1,11 @@
 import asyncio
 import logging
 import sys
+import json
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
+from typing import List, Dict, Any
 
-import json
 from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramNetworkError, TelegramConflictError
@@ -56,7 +57,65 @@ class AdminMiddleware(BaseMiddleware):
              return
         return await handler(event, data)
 
-# Notification Callback (Scraper -> Telegram)
+# --- Notification Logic ---
+
+async def _notify_admin(msg_text: str):
+    """Send notification to Admin/Channel."""
+    target_id = CHANNEL_ID if CHANNEL_ID else ADMIN_ID
+    if target_id:
+        try:
+            await admin_bot.send_message(target_id, msg_text, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Failed to notify admin: {e}")
+
+async def _notify_matching_users(ad_data: Dict[str, Any], msg_text: str):
+    """Notify users whose alerts match the new ad."""
+    if not user_bot: return
+
+    alerts = await get_active_alerts()
+    logger.debug(f"Notify User: Loaded {len(alerts)} active alerts.")
+    
+    notified_users = set()
+
+    for alert in alerts:
+        user_id = alert['user_id']
+        if user_id in notified_users:
+            continue
+
+        try:
+            filters = json.loads(alert['filters'])
+        except: continue
+        
+        if is_match(ad_data, filters):
+            logger.info(f"MATCH FOUND: Ad {ad_data.get('ad_id')} for User {user_id}")
+            try:
+                # Append Alert Name
+                import html
+                safe_alert_name = html.escape(alert['name'])
+                final_msg = f"🔔 <b>{safe_alert_name}</b>\n\n{msg_text}"
+                
+                # Add Deactivate Button AND Follow Ad Button
+                buttons = [
+                    [
+                        InlineKeyboardButton(text="Follow", callback_data=f"toggle_follow:{ad_data['ad_id']}"),
+                        InlineKeyboardButton(text="Details", callback_data=f"more_details:{ad_data['ad_id']}"),
+                        InlineKeyboardButton(text="Deactivate", callback_data=f"toggle_alert:{alert['alert_id']}:off")
+                    ]
+                ]
+                kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+                # Add timeout to prevent hanging the scraper cycle
+                await asyncio.wait_for(
+                    user_bot.send_message(user_id, final_msg, parse_mode="HTML", reply_markup=kb),
+                    timeout=10
+                )
+                logger.debug(f"Notification sent to {user_id}")
+                notified_users.add(user_id)
+            except asyncio.TimeoutError:
+                logger.error(f"Timeout notifying user {user_id}")
+            except Exception as u_e:
+                logger.warning(f"Failed to notify user {user_id}: {u_e}")
+
 async def notify_user(notification_type: str, ad_data: dict):
     """Send notification to Telegram (Admin & Users)."""
     try:
@@ -64,62 +123,62 @@ async def notify_user(notification_type: str, ad_data: dict):
         if not msg_text: return
         
         # 1. Notify Admin
-        target_id = CHANNEL_ID if CHANNEL_ID else ADMIN_ID
-        if target_id:
-             try:
-                 await admin_bot.send_message(target_id, msg_text, parse_mode="HTML")
-             except Exception as e:
-                 logger.error(f"Failed to notify admin: {e}")
+        await _notify_admin(msg_text)
         
-        # 2. Notify Users
-        if user_bot and notification_type in ['new', 'repost']:
-            alerts = await get_active_alerts()
-            logger.debug(f"Notify User: Loaded {len(alerts)} active alerts.")
-            
-            notified_users = set()
-
-            for alert in alerts:
-                user_id = alert['user_id']
-                if user_id in notified_users:
-                    continue
-
-                filters = dict()
-                try: filters = json.loads(alert['filters'])
-                except: continue
-                
-                if is_match(ad_data, filters):
-                    logger.info(f"MATCH FOUND: Ad {ad_data.get('ad_id')} for User {user_id}")
-                    try:
-                        # Append Alert Name
-                        final_msg = f"🔔 <b>{alert['name']}</b>\n\n{msg_text}"
-                        
-                        # Add Deactivate Button AND Follow Ad Button
-                        buttons = [
-                            [
-                                InlineKeyboardButton(text="Follow", callback_data=f"toggle_follow:{ad_data['ad_id']}"),
-                                InlineKeyboardButton(text="Details", callback_data=f"more_details:{ad_data['ad_id']}"),
-                                InlineKeyboardButton(text="Deactivate", callback_data=f"toggle_alert:{alert['alert_id']}:off")
-                            ]
-                        ]
-                        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-
-                        # Add timeout to prevent hanging the scraper cycle
-                        await asyncio.wait_for(
-                            user_bot.send_message(user_id, final_msg, parse_mode="HTML", reply_markup=kb),
-                            timeout=10
-                        )
-                        logger.debug(f"Notification sent to {user_id}")
-                        notified_users.add(user_id)
-                    except asyncio.TimeoutError:
-                        logger.error(f"Timeout notifying user {user_id}")
-                    except Exception as u_e:
-                        logger.warning(f"Failed to notify user {user_id}: {u_e}")
+        # 2. Notify Users (only for new/repost, handled by alerts)
+        if notification_type in ['new', 'repost']:
+            await _notify_matching_users(ad_data, msg_text)
 
     except Exception as e:
         logger.error(f"Failed to send notification: {e}")
 
+async def process_follow_notifications(notifications: List[Dict[str, Any]]):
+    """Process updates for followed ads."""
+    if not user_bot: return
+
+    logger.info(f"Processing {len(notifications)} follow notifications.")
+    
+    for note in notifications:
+        ad_data = note['ad']
+        ad_id = ad_data['ad_id']
+        
+        followers = await get_ad_followers(ad_id)
+        if not followers: continue
+
+        change_msg = f"🔔 <b>Update on Ad #ad{ad_id}</b>\n\n"
+        
+        if note['type'] == 'price_change':
+            change_msg += f"💰 {note['change']}\n"
+        elif note['type'] == 'status_change':
+            desc = str(note['change']).lower()
+            if 'deactivated' in desc:
+                    change_msg += f"\n⛔ <b>Deactivated</b>\n\n"
+            elif 'activated' in desc:
+                    change_msg += f"\n✅ <b>Activated</b>\n\n"
+            else:
+                    change_msg += f"🆙 {note['change']}\n"
+        elif note['type'] == 'repost':
+            change_msg += f"🔄 Reposted\n"
+        
+        # Add link
+        change_msg += f"<a href=\"{ad_data['ad_url']}\">{ad_data.get('car_brand')} {ad_data.get('car_model')}</a>"
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Details", callback_data=f"more_details:{ad_id}"),
+                InlineKeyboardButton(text="Unfollow", callback_data=f"toggle_follow:{ad_id}")
+            ]
+        ])
+        
+        for user_id in followers:
+            try:
+                await user_bot.send_message(user_id, change_msg, parse_mode="HTML", reply_markup=kb)
+            except Exception as e:
+                logger.warning(f"Failed to notify follower {user_id}: {e}")
+
 # Scraper Job Wrapper
 async def scraper_job():
+    """Scheduled job to run the scraper cycle."""
     if scraper.is_running:
         logger.warning("Scraper cycle already running. Skipping.")
         return
@@ -127,11 +186,7 @@ async def scraper_job():
     logger.info("Scheduler Trigger: Starting scraper cycle.")
     
     # Notify Start
-    try:
-         target_id = CHANNEL_ID if CHANNEL_ID else ADMIN_ID
-         if target_id:
-             await admin_bot.send_message(target_id, "🏁 <b>Scraper cycle started...</b>", parse_mode="HTML")
-    except Exception: pass
+    await _notify_admin("🏁 <b>Scraper cycle started...</b>")
 
     # Run Cycle
     new_ads_count = await scraper.run_cycle(notify_callback=notify_user)
@@ -139,81 +194,20 @@ async def scraper_job():
     # Run Followed Ads Check
     follow_notifications = await scraper.check_followed_ads()
     if follow_notifications:
-        logger.info(f"Processing {len(follow_notifications)} follow notifications.")
-        
-        # Group by Ad ID to avoid fetching history/sending multiple times if logic allows
-        # But notifications list is flat.
-        
-        for note in follow_notifications:
-            ad_data = note['ad']
-            ad_id = ad_data['ad_id']
-            # change_type = note['type']
-            
-            # Fetch History for Context
-            history = await get_ad_history(ad_id, limit=5)
-            
-            # Use 'details' format or standard? 
-            # Req: "combine the changes in same notification if many" -> check_followed_ads logic might produce multiple entries?
-            # Actually check_followed_ads produces one notification dict per check cycle per ad if any change happens, 
-            # but currently it appends for each change type.
-            # Let's Refine check_followed_ads in future to group return, but for now iterate.
-            
-            # We want to send updates to followers.
-            followers = await get_ad_followers(ad_id)
-            if not followers: continue
-
-            # For update notifications, we can use the 'details' template or a specific update template.
-            # Req: "Changes: ... show only last changes 50 records" is for "More Details".
-            # For periodic notification: "bot periodicaly checks... and notify user about: Price changing..."
-            
-            # Let's use a concise format for the update notification, possibly with a "More details" button.
-            # Let's use a concise format for the update notification, possibly with a "More details" button.
-            change_msg = f"🔔 <b>Update on Ad #ad{ad_id}</b>\n\n"
-            
-            if note['type'] == 'price_change':
-                change_msg += f"💰 {note['change']}\n"
-            elif note['type'] == 'status_change':
-                desc = str(note['change']).lower()
-                if 'deactivated' in desc:
-                     change_msg += f"\n⛔ <b>Deactivated</b>\n\n"
-                elif 'activated' in desc:
-                     change_msg += f"\n✅ <b>Activated</b>\n\n"
-                else:
-                     change_msg += f"🆙 {note['change']}\n"
-            elif note['type'] == 'repost':
-                change_msg += f"🔄 Reposted\n"
-            
-            # Add link
-            change_msg += f"<a href=\"{ad_data['ad_url']}\">{ad_data.get('car_brand')} {ad_data.get('car_model')}</a>"
-
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="Details", callback_data=f"more_details:{ad_id}"),
-                    InlineKeyboardButton(text="Unfollow", callback_data=f"toggle_follow:{ad_id}")
-                ]
-            ])
-            
-            for user_id in followers:
-                try:
-                    await user_bot.send_message(user_id, change_msg, parse_mode="HTML", reply_markup=kb)
-                except Exception as e:
-                    logger.warning(f"Failed to notify follower {user_id}: {e}")
+        await process_follow_notifications(follow_notifications)
 
     next_run = datetime.now() + timedelta(minutes=6)
     next_run_str = next_run.strftime('%H:%M:%S')
     logger.info(f"Cycle finished. Next run approx: {next_run_str}")
     
     # Notify Finish
-    try:
-        if target_id:
-            text = (
-                f"🏁 <b>Cycle Finished</b>\n"
-                f"✅ New Ads: {new_ads_count}\n"
-                f"👀 Followed Updates: {len(follow_notifications)}\n"
-                f"⏰ Next Run: {next_run_str} (approx)"
-            )
-            await admin_bot.send_message(target_id, text, parse_mode="HTML")
-    except Exception: pass
+    text = (
+        f"🏁 <b>Cycle Finished</b>\n"
+        f"✅ New Ads: {new_ads_count}\n"
+        f"👀 Followed Updates: {len(follow_notifications)}\n"
+        f"⏰ Next Run: {next_run_str} (approx)"
+    )
+    await _notify_admin(text)
 
 
 async def on_startup():
@@ -223,9 +217,6 @@ async def on_startup():
     
     if not scheduler.running:
         scheduler.start()
-        
-    # Initial run immediately?
-    # asyncio.create_task(scraper_job()) 
 
 async def main():
     await init_db()
