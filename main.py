@@ -196,7 +196,7 @@ async def scraper_job():
     if follow_notifications:
         await process_follow_notifications(follow_notifications)
 
-    next_run = datetime.now() + timedelta(minutes=6)
+    next_run = datetime.now() + timedelta(minutes=35)
     next_run_str = next_run.strftime('%H:%M:%S')
     logger.info(f"Cycle finished. Next run approx: {next_run_str}")
     
@@ -213,7 +213,7 @@ async def scraper_job():
 async def on_startup():
     # Ensure job is added
     if not scheduler.get_job('scraper_job'):
-        scheduler.add_job(scraper_job, 'interval', minutes=6, id='scraper_job')
+        scheduler.add_job(scraper_job, 'interval', minutes=35, id='scraper_job')
     
     if not scheduler.running:
         scheduler.start()
@@ -224,11 +224,18 @@ async def main():
     # Setup Admin Bot
     dp_admin.message.middleware(AdminMiddleware())
     dp_admin.include_router(admin_router)
+    from admin_bot.user_management import user_management_router
+    dp_admin.include_router(user_management_router)
     # Inject services
     dp_admin.workflow_data.update(scraper=scraper, scheduler=scheduler)
     dp_admin.startup.register(on_startup)
     
+
     # Setup User Bot
+    from client_bot.middleware import UserActivityMiddleware
+    dp_user.message.middleware(UserActivityMiddleware())
+    dp_user.callback_query.middleware(UserActivityMiddleware())
+
     dp_user.include_router(user_router)
     dp_user.workflow_data.update(scraper=scraper)
     

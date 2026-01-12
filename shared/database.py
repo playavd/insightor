@@ -103,10 +103,110 @@ async def init_db() -> None:
         except aiosqlite.OperationalError:
             pass # Column already exists
             
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                action TEXT,
+                timestamp DATETIME,
+                FOREIGN KEY(user_id) REFERENCES users(user_id)
+            )
+        """)
+        
         await db.commit()
     logger.info("Database initialized.")
 
-# --- ADS CRUD ---
+# --- USER LOGS & MANAGEMENT ---
+
+async def log_user_activity(user_id: int, action: str) -> None:
+    """Log user activity (message or callback)."""
+    async with db_lock:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            await db.execute(
+                "INSERT INTO user_logs (user_id, action, timestamp) VALUES (?, ?, ?)",
+                (user_id, action, datetime.now())
+            )
+            await db.commit()
+
+async def get_user_activities(user_id: int, limit: int = 50) -> List[dict[str, Any]]:
+    """Get recent activities for a user."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM user_logs WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
+            (user_id, limit)
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+async def get_all_users_paginated(limit: int = 10, offset: int = 0) -> List[dict[str, Any]]:
+    """Get all users with basic stats for the list view."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        # Get users and count their alerts/favorites/activity
+        query = """
+            SELECT u.*, 
+                   (SELECT COUNT(*) FROM alerts WHERE user_id = u.user_id) as total_alerts,
+                   (SELECT COUNT(*) FROM followed_ads WHERE user_id = u.user_id) as total_favorites,
+                   (SELECT MAX(timestamp) FROM user_logs WHERE user_id = u.user_id) as last_active
+            FROM users u
+            ORDER BY joined_date DESC
+            LIMIT ? OFFSET ?
+        """
+        async with db.execute(query, (limit, offset)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+async def get_total_users_count() -> int:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM users") as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
+async def search_users(query: str) -> List[dict[str, Any]]:
+    """Search users by ID or username."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        sql = """
+            SELECT * FROM users 
+            WHERE CAST(user_id AS TEXT) LIKE ? OR username LIKE ?
+            LIMIT 5
+        """
+        param = f"%{query}%"
+        async with db.execute(sql, (param, param)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+async def delete_all_user_data(user_id: int) -> None:
+    """Clear all alerts and favorites for a user."""
+    async with db_lock:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            await db.execute("DELETE FROM alerts WHERE user_id = ?", (user_id,))
+            await db.execute("DELETE FROM followed_ads WHERE user_id = ?", (user_id,))
+            await db.execute("UPDATE users SET active_alerts_count = 0 WHERE user_id = ?", (user_id,))
+            await db.commit()
+
+async def get_user_stats(user_id: int) -> dict[str, Any]:
+    """Get detailed stats for a specific user profile."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        queries = {
+            "alerts_active": "SELECT COUNT(*) FROM alerts WHERE user_id = ? AND is_active = 1",
+            "alerts_inactive": "SELECT COUNT(*) FROM alerts WHERE user_id = ? AND is_active = 0",
+            "favorites": "SELECT COUNT(*) FROM followed_ads WHERE user_id = ?",
+            "total_activities": "SELECT COUNT(*) FROM user_logs WHERE user_id = ?",
+            "last_active": "SELECT MAX(timestamp) FROM user_logs WHERE user_id = ?",
+            # Assuming we had way to track bot messages to user, but we don't track that explicitly yet in DB.
+            # We will return None for 'last_bot_message' for now or implement if needed.
+        }
+        
+        stats = {}
+        for key, sql in queries.items():
+            async with db.execute(sql, (user_id,)) as cursor:
+                row = await cursor.fetchone()
+                stats[key] = row[0] if row else 0
+                
+        return stats
 
 # --- ADS CRUD ---
 
