@@ -15,7 +15,7 @@ admin_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="▶️ Start Scraper"), KeyboardButton(text="⏸ Pause Scraper")],
         [KeyboardButton(text="📊 Statistics"), KeyboardButton(text="📜 View Logs")],
-        [KeyboardButton(text="📥 Download Data")]
+        [KeyboardButton(text="📥 Download Data"), KeyboardButton(text="👥 Users")]
     ],
     resize_keyboard=True
 )
