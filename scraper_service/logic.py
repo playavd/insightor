@@ -191,10 +191,12 @@ class BazarakiScraper:
              if check_text:
                  # Let's try to parse the first word of the H1 if it's not "Car" or "For Sale".
                  words = check_text.split()
-                 if words and (words[0].isalpha() or '-' in words[0]):
-                      details['car_brand'] = words[0] # Aggressive fallback, but better than Unknown
-                      if len(words) > 1:
-                          details['car_model'] = words[1]
+                 if words:
+                     clean_word = words[0].rstrip(',.:;')
+                     if clean_word and (clean_word.isalpha() or '-' in clean_word or '/' in clean_word):
+                         details['car_brand'] = clean_word # Aggressive fallback, but better than Unknown
+                         if len(words) > 1:
+                             details['car_model'] = words[1].rstrip(',.:;')
 
 
         # Specs

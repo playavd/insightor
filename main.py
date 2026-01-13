@@ -7,7 +7,7 @@ from logging.handlers import RotatingFileHandler
 from typing import List, Dict, Any
 
 from aiogram import Bot, Dispatcher, BaseMiddleware
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from aiogram.exceptions import TelegramNetworkError, TelegramConflictError
 from aiohttp.client_exceptions import ClientConnectorError, ClientOSError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -217,6 +217,14 @@ async def on_startup():
     
     if not scheduler.running:
         scheduler.start()
+
+    if user_bot:
+        try:
+            await user_bot.set_my_commands([
+                BotCommand(command="start", description="Main Menu / Restart"),
+            ])
+        except Exception as e:
+            logger.warning(f"Failed to set commands: {e}")
 
 async def main():
     await init_db()
